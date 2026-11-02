@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Metroid Room Viewer</title>
+<style>
+  :root { --bg:#000; --panel:#070a24; --line:#2038ec; --text:#c4d4fc; --hi:#fc9838; --dim:#6a78a8; --ok:#4cdc48; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  body { display: grid; grid-template-columns: 352px 1fr; grid-template-rows: 100%; overflow: hidden; }
+  #side { background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+  h1 { margin: 0; color: var(--hi); font-size: 18px; letter-spacing: 4px; }
+  h2 { margin: 6px 0 0; font-size: 11px; letter-spacing: 3px; color: var(--dim); font-weight: normal; }
+  #mapwrap { position: relative; }
+  #map { width: 320px; height: 320px; image-rendering: pixelated; cursor: crosshair; border: 1px solid var(--line); display: block; }
+  #tip { position: absolute; pointer-events: none; background: #000; border: 1px solid var(--line); padding: 1px 5px; white-space: nowrap; display: none; font-size: 12px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 11px; color: var(--dim); }
+  .legend i { display: inline-block; width: 9px; height: 9px; margin-right: 4px; vertical-align: -1px; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+  button, select { background: #000; color: var(--text); border: 1px solid var(--line); padding: 4px 8px; font: inherit; cursor: pointer; }
+  button:hover, select:hover { border-color: var(--hi); }
+  button.on { border-color: var(--hi); color: var(--hi); }
+  label { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); }
+  input[type=range] { accent-color: var(--hi); width: 110px; }
+  input[type=checkbox] { accent-color: var(--hi); }
+  #info { border: 1px solid #141c50; padding: 8px; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+  #info b { color: var(--dim); font-weight: normal; }
+  #stage { position: relative; overflow: hidden; }
+  #gl, #flat { position: absolute; image-rendering: pixelated; }
+  #gl { left: 0; top: 0; width: 100%; height: 100%; cursor: grab; }
+  #gl:active { cursor: grabbing; }
+  #flat { display: none; }
+  #help { position: absolute; left: 10px; bottom: 8px; color: var(--dim); font-size: 11px; pointer-events: none; }
+  #drop { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; text-align: center; padding: 24px; background: #000; }
+  #drop h1 { font-size: 30px; letter-spacing: 8px; }
+  #drop p { margin: 0; color: var(--dim); max-width: 520px; }
+  #drop.hidden { display: none; }
+  #drop button { font-size: 15px; padding: 10px 18px; border-color: var(--hi); color: var(--hi); }
+  #err { color: #fc7460; min-height: 1em; }
+  .drag #drop { background: #0b0f2e; }
+  @media (max-width: 760px) {
+    body { grid-template-columns: 1fr; grid-template-rows: 55vh auto; overflow: auto; }
+    #stage { grid-row: 1; } #side { grid-row: 2; border-right: 0; border-top: 1px solid var(--line); overflow: visible; }
+    #map { width: 100%; height: auto; aspect-ratio: 1; }
+  }
+</style>
+</head>
+<body>
+<div id="side">
+  <h1>METROID ROOMS</h1>
+  <div id="mapwrap"><canvas id="map" width="320" height="320"></canvas><div id="tip"></div></div>
+  <div class="legend" id="legend"></div>
+  <div class="row">
+    <label>Area <select id="area"></select></label>
+    <label>Room <select id="room"></select></label>
+    <button id="prev" title="Previous room number">&lt;</button><button id="next" title="Next room number">&gt;</button>
+  </div>
+  <div id="info"></div>
+  <h2>VIEW</h2>
+  <div class="row">
+    <button id="mode" class="on">3D</button>
+    <select id="cam" title="Camera">
+      <option value="tilt">Tilt</option><option value="diorama">Diorama</option><option value="side">Side</option>
+      <option value="low">Low</option><option value="far">Far</option><option value="top">Top</option>
+    </select>
+    <label>Depth <input id="depth" type="range" min="4" max="48" step="2" value="16"></label>
+  </div>
+  <div class="row">
+    <label>Back wall <select id="back"><option value="near">Near</option><option value="far">Deep</option><option value="off">Off</option></select></label>
+    <label><input id="cave" type="checkbox" checked>Backdrop</label>
+    <label><input id="light" type="checkbox">Lantern</label>
+  </div>
+  <div class="row">
+    <label><input id="doors" type="checkbox" checked>Doors</label>
+    <label><input id="items" type="checkbox" checked>Items</label>
+    <label><input id="grid" type="checkbox">Grid</label>
+  </div>
+  <h2>ROM</h2>
+  <div class="row">
+    <button id="change">CHANGE ROM</button>
+    <label title="Keep the ROM in this browser so the viewer opens straight away next time"><input id="keep" type="checkbox" checked>Remember</label>
+  </div>
+  <p style="margin:0;color:var(--dim);font-size:11px">Rooms are rebuilt from your own ROM in this page. Nothing from the game is included or uploaded.</p>
+</div>
+<div id="stage">
+  <canvas id="gl"></canvas>
+  <canvas id="flat" width="256" height="240"></canvas>
+  <div id="help">Drag to orbit · wheel to zoom · double-click resets · arrow keys walk the map · F2 switches 2D/3D</div>
+  <div id="drop">
+    <h1>METROID ROOMS</h1>
+    <p>Choose your <b>Metroid (USA)</b> ROM (.nes) to explore every room in 3D. It's read here in your browser and never leaves it.</p>
+    <button id="pick">CHOOSE ROM</button>
+    <p>or drag the file onto this page</p>
+    <div id="err"></div>
+  </div>
+</div>
+<input id="file" type="file" accept=".nes" hidden>
+<script>
+/* mroom.js - Metroid (USA) room decoder: rebuilds a room's nametable, palette and pattern tables from the ROM,
+ * the way the game does (SetupRoom/DrawStruct, LoadGFX). Shared by the room viewer page and its tests. */
+(function (root) {
+  'use strict';
+  var R = {};
+  R.AREAS = ['BRINSTAR', 'NORFAIR', 'KRAID', 'TOURIAN', 'RIDLEY'];
+  var BANK = [1, 2, 4, 3, 5];                         // area -> PRG bank
+  // GFXInfo (bank 7, $C6E0): [bank, src, ppu dest, length]
+  var GFX = [[6,0x8000,0x0000,0x09A0],[4,0x8D60,0x0000,0x0520],[1,0x8D60,0x1000,0x0400],[6,0x9DA0,0x1000,0x0150],
+    [5,0x8D60,0x1200,0x0450],[6,0x9EF0,0x1800,0x0800],[1,0x9160,0x0C00,0x0400],[6,0xA6F0,0x1000,0x0260],[6,0xA950,0x1700,0x0070],
+    [2,0x8D60,0x0C00,0x0400],[6,0xA9C0,0x1000,0x02E0],[6,0xACA0,0x1200,0x0600],[6,0xB2A0,0x1900,0x0090],[5,0x91B0,0x1D00,0x0300],
+    [2,0x9160,0x0C00,0x0400],[6,0xB330,0x1700,0x00C0],[4,0x9360,0x1E00,0x0200],[3,0x8D60,0x0C00,0x0400],[6,0xB3F0,0x1700,0x00C0],
+    [3,0x9160,0x0C00,0x0400],[6,0x89A0,0x0C00,0x0100],[6,0x8BE0,0x1400,0x0500],[6,0x9980,0x1FC0,0x0040],[6,0xB4C0,0x1000,0x0400],
+    [6,0xB4C0,0x0A00,0x00A0],[6,0x9980,0x0FC0,0x0040],[6,0xB4C0,0x1D00,0x02A0],[6,0x90E0,0x0000,0x07B0],[6,0x9890,0x1F40,0x0010]];
+  // Init<Area>GFX lists (entry 0 = Samus/items sprites, loaded at game start)
+  var AREA_GFX = [[0,3,4,5,6,0x19,0x16], [0,4,5,7,8,9,0x19,0x16], [0,4,5,0x0A,0x0F,0x10,0x11,0x19,0x16],
+                  [0,5,0x0A,0x0B,0x0C,0x0D,0x0E,0x1A,0x1C,0x19,0x16], [0,4,5,0x0A,0x12,0x13,0x19,0x16]];
+  R.WORLD_MAP = 0x254E;
+
+  R.check = function (rom) {
+    if (rom.length < 0x20010 || rom[0] !== 0x4E || rom[1] !== 0x45 || rom[2] !== 0x53) return 'not an iNES ROM';
+    var c = 0xFFFFFFFF;
+    for (var i = 16; i < rom.length; i++) { c ^= rom[i]; for (var k = 0; k < 8; k++) c = (c >>> 1) ^ (0xEDB88320 & -(c & 1)); }
+    c = (~c) >>> 0;
+    return c === 0x70080810 ? '' : 'not Metroid (USA) (CRC ' + c.toString(16) + ')';
+  };
+  function off(bank, addr) { return 16 + bank * 0x4000 + ((addr - 0x8000) & 0x3FFF); }
+  function w(rom, o) { return rom[o] | rom[o + 1] << 8; }
+
+  // What is already in CHR RAM when an area loads: the title screen, then LoadSamusGFX at game start
+  var START_GFX = [0x15, 0, 0x14, 0x17, 0x18, 0x19, 0x16];
+  R.chr = function (rom, area) {
+    var chr = new Uint8Array(0x2000);
+    START_GFX.concat(AREA_GFX[area]).forEach(function (e) {
+      var g = GFX[e], s = off(g[0], g[1]);
+      for (var i = 0; i < g[3]; i++) chr[(g[2] + i) & 0x1FFF] = rom[s + i];
+    });
+    return chr;
+  };
+  R.area = function (rom, a) {
+    var b = BANK[a], hdr = off(b, 0x9598);
+    var o = { bank: b, spec: w(rom, hdr), rooms: w(rom, hdr + 2), structs: w(rom, hdr + 4), macros: w(rom, hdr + 6) };
+    o.roomCount = (o.structs - o.rooms) >> 1;
+    // palette: Palette00, a PPU string list (hi, lo, len, data...) ended by 0
+    var pal = new Uint8Array(32), p = off(b, w(rom, off(b, 0x9560)));
+    for (var guard = 0; guard < 8 && rom[p] === 0x3F; guard++) {
+      var dst = rom[p + 1] & 0x1F, n = rom[p + 2]; p += 3;
+      for (var i = 0; i < n; i++) pal[(dst + i) & 31] = rom[p + i];
+      p += n;
+    }
+    o.pal = pal;
+    return o;
+  };
+  R.worldMap = function (rom) { return rom.slice(R.WORLD_MAP, R.WORLD_MAP + 1024); };
+
+  /** Builds room n of area a into a 1 KB nametable (32x30 tiles + attributes). Returns {nt, doors, objects}. */
+  R.room = function (rom, a, n) {
+    var A = R.area(rom, a), b = A.bank, nt = new Uint8Array(0x400).fill(0xFF);
+    var rp = off(b, w(rom, off(b, A.rooms) + n * 2)), roomPal = rom[rp] & 3;
+    for (var i = 0x3C0; i < 0x400; i++) nt[i] = [0x00, 0x55, 0xAA, 0xFF][roomPal];
+    var p = rp + 1, objects = [];
+    for (var guard = 0; guard < 200; guard++) {
+      var c = rom[p];
+      if (c === 0xFF || c === 0xFD) break;
+      if (c === 0xFE) { p++; continue; }
+      var pos = c, si = rom[p + 1], opal = rom[p + 2] & 3;
+      objects.push({ y: pos >> 4, x: pos & 15, struct: si, pal: opal });
+      drawStruct(rom, A, nt, ((pos >> 4) * 2) * 32 + (pos & 15) * 2, si, opal, opal !== roomPal);
+      p += 3;
+    }
+    var doors = [], enemies = [], elevator = null, statues = false;
+    if (rom[p] === 0xFD) {
+      p++;
+      for (guard = 0; guard < 40 && rom[p] !== 0xFF; guard++) {
+        var t = rom[p] & 0x0F;
+        if (t === 1) { enemies.push({ slot: rom[p] >> 4, type: rom[p + 1], y: rom[p + 2] >> 4, x: rom[p + 2] & 15 }); p += 3; }
+        else if (t === 2) { var d = rom[p + 1]; doors.push({ left: !!(d & 0x10), kind: d & 3 }); p += 2; }
+        else if (t === 4) { elevator = rom[p + 1]; p += 2; }
+        else if (t === 6) { statues = true; p += 1; }
+        else if (t === 7) { p += 2; }
+        else break;
+      }
+    }
+    // LoadDoor: the door's own column of invisible solid tiles ($4E), rows 10-15, column 2 (left) or 29 (right)
+    doors.forEach(function (d) { for (var r = 10; r < 16; r++) nt[r * 32 + (d.left ? 2 : 29)] = 0x4E; });
+    return { nt: nt, pal: roomPal, objects: objects, doors: doors, enemies: enemies, elevator: elevator, statues: statues };
+  };
+  function drawStruct(rom, A, nt, start, si, opal, setAttr) {
+    var b = A.bank, sp = off(b, w(rom, off(b, A.structs) + si * 2)), row = start;
+    for (var guard = 0; guard < 32; guard++) {
+      var len = rom[sp]; if (len === 0xFF) return;
+      var count = (len & 15) || 16, x = row + (len >> 4) * 2;
+      for (var k = 0; k < count; k++) {
+        if (x >= 0x3C0) return;
+        var m = rom[sp + 1 + k], mp = off(b, A.macros) + m * 4;
+        nt[x] = rom[mp]; nt[x + 1] = rom[mp + 1]; nt[x + 32] = rom[mp + 2]; nt[x + 33] = rom[mp + 3];
+        if (setAttr) {
+          var tx = x & 31, ty = x >> 5, ai = 0x3C0 + (ty >> 2) * 8 + (tx >> 2), sh = ((ty & 2) << 1) | (tx & 2);
+          nt[ai] = (nt[ai] & ~(3 << sh)) | (opal << sh);
+        }
+        x += 2;
+        if ((x & 31) === 0) { k = count; break; }        // row ends at the right edge (the game cuts it)
+      }
+      sp += 1 + count; row += 64;
+    }
+  }
+  /** Solid 2x2 blocks the area's rooms are built from: [{tiles:[4], pal, count}] (the 3D backdrop's material). */
+  R.blocks = function (rom, a) {
+    var A = R.area(rom, a), b = A.bank, count = new Int32Array(1024), out = [];
+    for (var n = 0; n < A.roomCount && n < 128; n++) {
+      var p = off(b, w(rom, off(b, A.rooms) + n * 2)) + 1;
+      for (var g = 0; g < 200; g++) {
+        var c = rom[p];
+        if (c === 0xFF || c === 0xFD) break;
+        if (c === 0xFE) { p++; continue; }
+        var pal = rom[p + 2] & 3, sp = off(b, w(rom, off(b, A.structs) + rom[p + 1] * 2));
+        for (var row = 0; row < 32; row++) {
+          var len = rom[sp]; if (len === 0xFF) break;
+          var cnt = (len & 15) || 16;
+          for (var k = 0; k < cnt; k++) count[rom[sp + 1 + k] * 4 + pal]++;
+          sp += 1 + cnt;
+        }
+        p += 3;
+      }
+    }
+    for (var key = 0; key < 1024; key++) {
+      if (!count[key]) continue;
+      var mp = off(b, A.macros) + (key >> 2) * 4, t = [rom[mp], rom[mp + 1], rom[mp + 2], rom[mp + 3]];
+      if (t.every(function (x) { return x < 0xA0; })) out.push({ tiles: t, pal: key & 3, count: count[key] });
+    }
+    return out;
+  };
+  /** Special items table of area a: [{x, y, powerups: [{type, x, y}], elevator, palette}] (ScanForItems). */
+  R.spec = function (rom, a) {
+    var A = R.area(rom, a), b = A.bank, out = [], L = A.spec;
+    for (var g1 = 0; g1 < 64 && L !== 0xFFFF; g1++) {
+      var lp = off(b, L), y = rom[lp], next = w(rom, lp + 1), p = lp + 3;
+      for (var g2 = 0; g2 < 32; g2++) {
+        var e = { x: rom[p], y: y, powerups: [], elevator: null, palette: false }, nxt = rom[p + 1], q = p + 2;
+        for (var g3 = 0; g3 < 8; g3++) {           // handler chain; stop at an unknown length
+          var t = rom[q] & 15;
+          if (t === 0) break;
+          if (t === 2) { e.powerups.push({ type: rom[q + 1], y: rom[q + 2] >> 4, x: rom[q + 2] & 15 }); q += 3; }
+          else if (t === 4) { e.elevator = rom[q + 1]; q += 2; }
+          else if (t === 9) { q += 2; }
+          else if (t === 1) { q += 3; }
+          else if (t === 10) { e.palette = true; q += 1; }
+          else break;
+        }
+        out.push(e);
+        if (nxt === 0xFF) break;
+        p += nxt;
+      }
+      L = next;
+    }
+    return out;
+  };
+  /** Best guess of the area of every world-map cell (-1 = no room): grown outwards from the cells each area's
+   *  special items table names, never into a cell whose room number that area doesn't have. */
+  /** Room edges: which of the 32 columns are open at the top/bottom, which rows are open at the sides, doors. */
+  R.shape = function (rom, a, n) {
+    var r = R.room(rom, a, n), nt = r.nt, open = function (row, col) { var t = nt[row * 32 + col]; return t === 0xFF || t >= 0xA0; };
+    var sh = { top: [], bottom: [], left: [], right: [], doorL: -1, doorR: -1 };
+    for (var c = 0; c < 32; c++) { sh.top.push(open(0, c) && open(1, c)); sh.bottom.push(open(28, c) && open(29, c)); }
+    for (var rr = 0; rr < 30; rr++) { sh.left.push(open(rr, 0)); sh.right.push(open(rr, 31)); }
+    r.doors.forEach(function (d) { if (d.left) sh.doorL = d.kind; else sh.doorR = d.kind; });
+    return sh;
+  };
+  /** Which area each world-map cell belongs to (-1: unknown). Grown from each area's special-item cells (items,
+   *  elevators, doors). Pass 1 follows real connections only (open edges that line up, or a door on each side), so
+   *  what it reaches is certain; `strict` keeps that result. Pass 2 then fills the cells it couldn't reach (shafts
+   *  behind breakable blocks etc.) by plain adjacency within the area's room count. */
+  R.areaMap = function (rom, strictOnly) {
+    var map = R.worldMap(rom), am = new Int8Array(1024).fill(-1), q = [], counts = [], shapes = {}, seeds = [];
+    var shapeOf = function (a, n) { var k = a * 256 + n; if (!(k in shapes)) { try { shapes[k] = R.shape(rom, a, n); } catch (e) { shapes[k] = null; } } return shapes[k]; };
+    var any = function (x, y) { for (var i = 0; i < x.length; i++) if (x[i] && y[i]) return true; return false; };
+    var DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    for (var a = 0; a < 5; a++) {
+      counts[a] = R.area(rom, a).roomCount;
+      R.spec(rom, a).forEach(function (e) { var i = e.y * 32 + e.x; if (e.x < 32 && e.y < 32 && map[i] !== 0xFF && map[i] < counts[a] && am[i] < 0) { am[i] = a; q.push(i); } });
+    }
+    var grow = function (strict) {
+      for (var h = 0; h < q.length; h++) {
+        var i = q[h], a2 = am[i], x = i & 31, y = i >> 5, A = strict ? shapeOf(a2, map[i]) : null;
+        if (strict && !A) continue;
+        DIRS.forEach(function (d) {
+          var nx = x + d[0], ny = y + d[1]; if (nx < 0 || ny < 0 || nx > 31 || ny > 31) return;
+          var j = ny * 32 + nx; if (am[j] >= 0 || map[j] === 0xFF || map[j] >= counts[a2]) return;
+          if (strict) {
+            var B = shapeOf(a2, map[j]); if (!B) return;
+            var ok = d[0] === 1 ? (A.doorR >= 0 && B.doorL >= 0) || (A.doorR < 0 && B.doorL < 0 && any(A.right, B.left))
+                   : d[0] === -1 ? (A.doorL >= 0 && B.doorR >= 0) || (A.doorL < 0 && B.doorR < 0 && any(A.left, B.right))
+                   : d[1] === 1 ? any(A.bottom, B.top) : any(A.top, B.bottom);
+            if (!ok) return;
+          }
+          am[j] = a2; q.push(j);
+        });
+      }
+    };
+    grow(true);
+    if (strictOnly) return am;
+    q = []; for (var k = 0; k < 1024; k++) if (am[k] >= 0) q.push(k);
+    grow(false);
+    return am;
+  };
+  root.MRoom = R;
+  if (typeof module !== 'undefined') module.exports = R;
+})(this);
+
+</script>
+<script>
+'use strict';
+const R = MRoom, $ = id => document.getElementById(id);
+const NESPAL = [0x747474,0x24188C,0x0000A8,0x44009C,0x8C0074,0xA80010,0xA40000,0x7C0800,0x402C00,0x004400,0x005000,0x003C14,0x183C5C,0,0,0,
+  0xBCBCBC,0x0070EC,0x2038EC,0x8000F0,0xBC00BC,0xE40058,0xD82800,0xC84C0C,0x887000,0x009400,0x00A800,0x009038,0x008088,0,0,0,
+  0xFCFCFC,0x3CBCFC,0x5C94FC,0xCC88FC,0xF478FC,0xFC74B4,0xFC7460,0xFC9838,0xF0BC3C,0x80D010,0x4CDC48,0x58F898,0x00E8D8,0x787878,0,0,
+  0xFCFCFC,0xA8E4FC,0xC4D4FC,0xD4C8FC,0xFCC4FC,0xFCC4D8,0xFCBCB0,0xFCD8A8,0xFCE4A0,0xE0FCA0,0xA8F0BC,0xB0FCCC,0x9CFCF0,0xC4C4C4,0,0];
+const rgb = i => { const c = NESPAL[i & 63]; return [(c >> 16) & 255, (c >> 8) & 255, c & 255]; };
+const css = i => '#' + ('00000' + NESPAL[i & 63].toString(16)).slice(-6);
+const AREA_COL = [[0x12, 0x21], [0x16, 0x27], [0x1A, 0x2A], [0x1C, 0x2C], [0x14, 0x24]];
+const NAMES = ['Brinstar', 'Norfair', "Kraid's lair", 'Tourian', "Ridley's lair"];
+const ITEM = { 0: ['Bombs', [0x86, 0x87, 0x96, 0x97]], 1: ['High jump', [0x7B, 0x7C, 0x8B, 0x8C]], 2: ['Long beam', [0x88, 0x67, 0x98, 0x99]],
+  3: ['Screw attack', [0x80, 0x81, 0x90, 0x91]], 4: ['Morph ball', [0x7D, 0x7E, 0x8D, 0x8E]], 5: ['Varia', [0x82, 0x83, 0x92, 0x93]],
+  6: ['Wave beam', [0x88, 0x89, 0x98, 0x99]], 7: ['Ice beam', [0x88, 0x68, 0x98, 0x99]], 8: ['Energy tank', [0x84, 0x85, 0x94, 0x95]],
+  9: ['Missiles', [0x3F, 0x13F, 0x4F, 0x14F]] };
+const DOOR_KIND = ['red (5 missiles)', 'blue', '10 missiles', '?'];
+
+// ------------------------------------------------------------------ state
+let rom = null, worldMap = null, areaMap = null, specs = [], chrs = [], areas = [];
+let cur = { area: 0, room: 0, cell: -1 }, frame = null, roomInfo = null;
+const store = (() => { try { localStorage.setItem('mrv.t', '1'); localStorage.removeItem('mrv.t'); return localStorage; } catch (e) { return null; } })();
+const sget = (k, d) => { try { const v = store && store.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } };
+const sset = (k, v) => { try { store && store.setItem(k, JSON.stringify(v)); } catch (e) {} };
+
+function b64(u) { let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); }
+function openRom(buf, remember) {
+  const u = new Uint8Array(buf), bad = R.check(u);
+  if (bad) { $('err').textContent = 'That file is ' + bad + '.'; return false; }
+  rom = u; worldMap = R.worldMap(rom); areaMap = R.areaMap(rom);
+  specs = []; chrs = []; areas = [];
+  for (let a = 0; a < 5; a++) { specs[a] = R.spec(rom, a); chrs[a] = R.chr(rom, a); areas[a] = R.area(rom, a); }
+  if (remember && $('keep').checked) { try { store && store.setItem('mrv.rom', b64(rom)); } catch (e) { /* storage full: just don't remember */ } }
+  $('drop').classList.add('hidden');
+  $('area').innerHTML = NAMES.map((n, i) => `<option value="${i}">${n}</option>`).join('');
+  const st = sget('mrv.at', { area: 0, room: 0, cell: 14 * 32 + 3 });
+  if (st.cell >= 0 && worldMap[st.cell] !== 0xFF && areaMap[st.cell] >= 0) selectCell(st.cell); else selectRoom(st.area, st.room, -1);
+  return true;
+}
+
+// ------------------------------------------------------------------ building a frame from the ROM
+// The 3D builder below works on emulator snapshots (RAM, nametables, palette, pattern tables). A room from the ROM is
+// turned into the same shape: nametable 0 holds the room, OAM holds the door bubbles and power-ups.
+function buildFrame(area, n, cell) {
+  const r = R.room(rom, area, n), A = areas[area];
+  const ram = new Uint8Array(0x800), nt = new Uint8Array(0x1000).fill(0xFF);
+  nt.set(r.nt, 0);
+  for (let t = 1; t < 4; t++) nt.fill(0, t * 0x400 + 0x3C0, t * 0x400 + 0x400);
+  ram[0xFF] = 0x10;                                    // PPUCTRL: background tiles at $1000, sprites at $0000
+  ram[0x74] = area;
+  for (let i = 0x200; i < 0x300; i += 4) ram[i] = 0xF8;
+  let s = 0;
+  const spr = (y, t, at, x) => { if (s >= 64) return; const o = 0x200 + s * 4; ram[o] = y; ram[o + 1] = t; ram[o + 2] = at; ram[o + 3] = x; s++; };
+  if ($('doors').checked) r.doors.forEach(d => {           // LoadDoor: bubble at x $10 / $E8, rows 10-15, palette = door kind
+    const x = d.left ? 0x10 : 0xE8, at = 0x20 | (d.left ? 0 : 0x40) | (d.kind & 3);
+    [0x0F, 0x1F, 0x2F].forEach((t, k) => spr(0x4F + k * 8, t, at, x));
+    [0x2F, 0x1F, 0x0F].forEach((t, k) => spr(0x67 + k * 8, t, at | 0x80, x));
+  });
+  const items = [];
+  if (cell >= 0) {
+    const e = specs[area].find(e => e.y * 32 + e.x === cell);
+    if (e) e.powerups.forEach(p => {
+      items.push(p);
+      if (!$('items').checked || !ITEM[p.type]) return;
+      const tl = ITEM[p.type][1], y = p.y * 16, x = p.x * 16;
+      tl.forEach((t, k) => spr(y + (k >> 1) * 8 - 1, t & 255, 0x01 | (t & 0x100 ? 0x40 : 0), x + (k & 1) * 8));
+    });
+  }
+  roomInfo = { r, items, A };
+  return { ram, nt, pal: A.pal, chr: chrs[area] };
+}
+
+function selectCell(i) {
+  if (worldMap[i] === 0xFF) return;
+  const a = areaMap[i] >= 0 ? areaMap[i] : cur.area;
+  selectRoom(a, worldMap[i], i);
+}
+function selectRoom(a, n, cell) {
+  if (n >= areas[a].roomCount) n = 0;
+  cur = { area: a, room: n, cell };
+  $('area').value = a;
+  $('room').innerHTML = Array.from({ length: areas[a].roomCount }, (_, k) => `<option value="${k}">${k} ($${k.toString(16).toUpperCase().padStart(2, '0')})</option>`).join('');
+  $('room').value = n;
+  frame = buildFrame(a, n, cell);
+  atlasKey = '';
+  sset('mrv.at', cur);
+  drawMap(); showInfo(); render();
+}
+function rebuild() { if (rom) { frame = buildFrame(cur.area, cur.room, cur.cell); render(); } }
+
+function showInfo() {
+  const { r, items, A } = roomInfo, c = cur.cell;
+  const uses = []; for (let i = 0; i < 1024; i++) if (worldMap[i] === cur.room && areaMap[i] === cur.area) uses.push(i);
+  const hex = v => '$' + v.toString(16).toUpperCase().padStart(2, '0');
+  const rows = [
+    ['Area', NAMES[cur.area]],
+    ['Room', cur.room + ' (' + hex(cur.room) + ')'],
+    ['Map', c >= 0 ? hex(c & 31) + ', ' + hex(c >> 5) : 'not chosen on the map'],
+    ['Used at', uses.length ? uses.length + ' place' + (uses.length > 1 ? 's' : '') + ' on the map' : 'nowhere on the map'],
+    ['Pieces', r.objects.length + ' structures'],
+    ['Doors', r.doors.length ? r.doors.map(d => (d.left ? 'left ' : 'right ') + DOOR_KIND[d.kind]).join(', ') : 'none'],
+    ['Items', items.length ? items.map(p => (ITEM[p.type] || ['type ' + p.type])[0]).join(', ') : 'none'],
+    ['Enemies', r.enemies.length + (r.statues ? ' + statues' : '') + (r.elevator != null ? ' + elevator' : '')]
+  ];
+  $('info').innerHTML = rows.map(([k, v]) => `<b>${k}</b><span>${v}</span>`).join('');
+}
+
+// ------------------------------------------------------------------ world map
+const mapc = $('map'), mctx = mapc.getContext('2d');
+$('legend').innerHTML = NAMES.map((n, i) => `<span><i style="background:${css(AREA_COL[i][0])}"></i>${n}</span>`).join('');
+function drawMap() {
+  mctx.fillStyle = '#000'; mctx.fillRect(0, 0, 320, 320);
+  mctx.fillStyle = '#0a0f2a';
+  for (let y = 0; y <= 32; y++) for (let x = 0; x <= 32; x++) mctx.fillRect(x * 10, y * 10, 1, 1);
+  for (let i = 0; i < 1024; i++) {
+    if (worldMap[i] === 0xFF) continue;
+    const x = (i & 31) * 10, y = (i >> 5) * 10, a = areaMap[i], col = a >= 0 ? AREA_COL[a] : [0x00, 0x10];
+    const same = j => j >= 0 && j < 1024 && worldMap[j] !== 0xFF && areaMap[j] === a;
+    mctx.fillStyle = css(col[0]); mctx.fillRect(x, y, 10, 10);
+    mctx.fillStyle = css(col[1]);
+    if (!same(i - 32)) mctx.fillRect(x, y, 10, 1);
+    if (!same(i + 32)) mctx.fillRect(x, y + 9, 10, 1);
+    if ((i & 31) === 0 || !same(i - 1)) mctx.fillRect(x, y, 1, 10);
+    if ((i & 31) === 31 || !same(i + 1)) mctx.fillRect(x + 9, y, 1, 10);
+    if (worldMap[i] === cur.room && a === cur.area && i !== cur.cell) { mctx.fillStyle = '#ffffff55'; mctx.fillRect(x + 3, y + 3, 4, 4); }
+  }
+  specs.forEach((sp, a) => sp.forEach(e => e.powerups.forEach(() => { mctx.fillStyle = css(0x28); mctx.fillRect(e.x * 10 + 4, e.y * 10 + 4, 2, 2); })));
+  if (cur.cell >= 0) {
+    const x = (cur.cell & 31) * 10, y = (cur.cell >> 5) * 10;
+    mctx.strokeStyle = '#fff'; mctx.lineWidth = 2; mctx.strokeRect(x - 1, y - 1, 12, 12);
+  }
+}
+function cellAt(e) { const r = mapc.getBoundingClientRect(); return Math.floor((e.clientY - r.top) / r.height * 32) * 32 + Math.floor((e.clientX - r.left) / r.width * 32); }
+mapc.addEventListener('click', e => { if (rom) selectCell(cellAt(e)); });
+mapc.addEventListener('mousemove', e => {
+  if (!rom) return;
+  const i = cellAt(e), tip = $('tip');
+  if (i < 0 || i > 1023 || worldMap[i] === 0xFF) { tip.style.display = 'none'; return; }
+  const a = areaMap[i];
+  tip.textContent = `${(i & 31).toString(16).toUpperCase()},${(i >> 5).toString(16).toUpperCase()}  room ${worldMap[i]}  ${a >= 0 ? NAMES[a] : '?'}`;
+  tip.style.display = 'block';
+  const r = mapc.getBoundingClientRect(), x = e.clientX - r.left + 12, y = e.clientY - r.top + 12;
+  tip.style.left = Math.min(x, 200) + 'px'; tip.style.top = y + 'px';
+});
+mapc.addEventListener('mouseleave', () => { $('tip').style.display = 'none'; });
+
+// ------------------------------------------------------------------ NES rules used by the 3D builder (same as the app)
+const isHud = () => false;
+const DOOR_TILES = new Set([0x0F, 0x1F, 0x2F, 0x6A, 0x6B, 0x6C]);
+const isDoorFrame = t => t === 0xA0 || t === 0xA1;
+const LAVA_PAT = [0x45,0xd7,0xff,0xff,0xfd,0xff,0xbf,0xfb,0,0,0,0,0x02,0,0x40,0x04,0xff,0xbb,0xff,0xff,0xef,0xff,0x7f,0xfd,0,0x44,0,0,0x10,0,0x80,0x02];
+function view(f) { const c = f.ram[0xFF]; return { ox: f.ram[0xFD] + (c & 1) * 256, oy: f.ram[0xFC] + ((c >> 1) & 1) * 240, bgBase: c & 0x10 ? 0x1000 : 0, spBase: c & 0x08 ? 0x1000 : 0 }; }
+function ntTile(f, wx, wy) {
+  wx = ((wx % 512) + 512) % 512; wy = ((wy % 480) + 480) % 480;
+  const tbl = (wx >= 256 ? 1 : 0) + (wy >= 240 ? 2 : 0), x = (wx % 256) >> 3, y = (wy % 240) >> 3;
+  const t = f.nt[tbl * 0x400 + y * 32 + x], a = f.nt[tbl * 0x400 + 0x3C0 + (y >> 2) * 8 + (x >> 2)];
+  return { t, p: (a >> (((y & 2) << 1) | (x & 2))) & 3 };
+}
+function findSlabs(f) {
+  const slab = new Array(64).fill(false);
+  for (let s = 0; s < 64; s++) { const o = 0x200 + s * 4; slab[s] = f.ram[o] < 0xEF && DOOR_TILES.has(f.ram[o + 1]); }
+  return slab;
+}
+
+// ------------------------------------------------------------------ 2D view (what the NES shows)
+const flat = $('flat'), fctx = flat.getContext('2d'), fimg = fctx.createImageData(256, 240);
+function draw2D(f) {
+  const v = view(f), d = fimg.data, bgc = rgb(f.pal[0]), opaque = new Uint8Array(256 * 240);
+  for (let i = 0; i < d.length; i += 4) { d[i] = bgc[0]; d[i + 1] = bgc[1]; d[i + 2] = bgc[2]; d[i + 3] = 255; }
+  for (let sy = 0; sy < 240; sy++) for (let sx = 0; sx < 256; sx++) {
+    const { t, p } = ntTile(f, sx, sy), lo = f.chr[v.bgBase + t * 16 + (sy & 7)], hi = f.chr[v.bgBase + t * 16 + (sy & 7) + 8], b = 7 - (sx & 7);
+    const c = ((lo >> b) & 1) | (((hi >> b) & 1) << 1);
+    if (c) { const k = (sy * 256 + sx) * 4, col = rgb(f.pal[p * 4 + c]); d[k] = col[0]; d[k + 1] = col[1]; d[k + 2] = col[2]; opaque[sy * 256 + sx] = 1; }
+  }
+  for (let s = 63; s >= 0; s--) {
+    const o = 0x200 + s * 4, y = f.ram[o] + 1, t = f.ram[o + 1], at = f.ram[o + 2], x = f.ram[o + 3];
+    if (y >= 240) continue;
+    for (let r = 0; r < 8; r++) {
+      const ry = at & 0x80 ? 7 - r : r, lo = f.chr[v.spBase + t * 16 + ry], hi = f.chr[v.spBase + t * 16 + ry + 8], sy = y + r;
+      if (sy >= 240) continue;
+      for (let cx = 0; cx < 8; cx++) {
+        const b = at & 0x40 ? cx : 7 - cx, c = ((lo >> b) & 1) | (((hi >> b) & 1) << 1), sx = x + cx;
+        if (!c || sx > 255 || ((at & 0x20) && opaque[sy * 256 + sx])) continue;
+        const k = (sy * 256 + sx) * 4, col = rgb(f.pal[16 + (at & 3) * 4 + c]); d[k] = col[0]; d[k + 1] = col[1]; d[k + 2] = col[2];
+      }
+    }
+  }
+  if ($('grid').checked) for (let y = 0; y < 240; y++) for (let x = 0; x < 256; x++) if ((x % 16 === 0 || y % 16 === 0)) { const k = (y * 256 + x) * 4; d[k] = (d[k] + 64) >> 1; d[k + 1] = (d[k + 1] + 64) >> 1; d[k + 2] = (d[k + 2] + 160) >> 1; }
+  fctx.putImageData(fimg, 0, 0);
+}
+
+// ------------------------------------------------------------------ WebGL scene (the app's 3D view)
+const glc = $('gl'), gl = glc.getContext('webgl2', { antialias: true, preserveDrawingBuffer: true });
+const VS = `#version 300 es
+in vec3 aPos; in vec2 aUv; in float aShade; in float aKind;
+uniform mat4 uMvp; out vec2 vUv; out float vShade; out float vKind; out vec3 vWorld;
+void main(){ vUv=aUv; vShade=aShade; vKind=aKind; vWorld=aPos; gl_Position=uMvp*vec4(aPos,1.0); }`;
+const FS = `#version 300 es
+precision highp float;
+in vec2 vUv; in float vShade; in float vKind; in vec3 vWorld;
+uniform sampler2D uTex; uniform sampler2D uCave; uniform vec3 uBg; uniform vec2 uLight; uniform float uLightOn;
+uniform int uMode; uniform sampler2D uMask; uniform float uGrid; uniform float uAlpha;
+out vec4 o;
+void main(){
+  if (uMode == 1) {
+    float k = 0.2;
+    k = mix(k, mix(0.4, 0.08, smoothstep(20.0, 150.0, distance(vWorld.xy, uLight))), uLightOn);
+    o = vec4(texture(uCave, vUv).rgb * k, 1.0); return;
+  }
+  vec4 c = texture(uTex, vUv);
+  if (c.a < 0.5) { if (vKind < 0.5) c = vec4(uBg * 0.55, 1.0); else discard; }
+  if (vKind > 4.5 && vKind < 5.5 && texture(uMask, vec2((vWorld.x + 0.5) / 256.0, (-vWorld.y + 0.5) / 256.0)).r > 0.5) discard;
+  float shade = vShade;
+  shade *= mix(1.0, mix(1.15, 0.3, smoothstep(24.0, 160.0, distance(vWorld.xy, uLight))), uLightOn);
+  vec3 col = c.rgb * shade;
+  if (uGrid > 0.5 && vKind < 0.5) { vec2 g = mod(vWorld.xy, 16.0); if (min(g.x, g.y) < 0.6) col = mix(col, vec3(0.25, 0.3, 0.9), 0.5); }
+  if (max(max(-vWorld.x, vWorld.x - 256.0), max(vWorld.y, -240.0 - vWorld.y)) > 0.0) discard;
+  o = vec4(col, uAlpha);
+}`;
+function shader(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(s); return s; }
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, FS)); gl.linkProgram(prog);
+const uni = n => gl.getUniformLocation(prog, n);
+const vbo = gl.createBuffer(), vao = gl.createVertexArray();
+gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+[['aPos', 3, 0], ['aUv', 2, 12], ['aShade', 1, 20], ['aKind', 1, 24]].forEach(([n, s, off]) => { const l = gl.getAttribLocation(prog, n); gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, s, gl.FLOAT, false, 28, off); });
+function texParams(wrap) {
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
+}
+// atlas: BG/SPR x 4 palettes x 256 tiles, 64 per row -> 512x256
+const tex = gl.createTexture(), atlas = new Uint8Array(512 * 256 * 4);
+let atlasKey = '';
+function buildAtlas(f) {
+  const key = cur.area + ':' + Array.from(f.pal).join(',');
+  if (key === atlasKey) return; atlasKey = key;
+  const v = view(f);
+  for (let set = 0; set < 8; set++) {
+    const spr = set >= 4, pal = set & 3, base = spr ? v.spBase : v.bgBase;
+    for (let t = 0; t < 256; t++) {
+      const idx = set * 256 + t, ax = (idx % 64) * 8, ay = Math.floor(idx / 64) * 8;
+      for (let y = 0; y < 8; y++) {
+        const lo = f.chr[base + t * 16 + y], hi = f.chr[base + t * 16 + y + 8];
+        for (let x = 0; x < 8; x++) {
+          const c = ((lo >> (7 - x)) & 1) | (((hi >> (7 - x)) & 1) << 1), k = ((ay + y) * 512 + ax + x) * 4, col = rgb(f.pal[(spr ? 16 : 0) + pal * 4 + c]);
+          atlas[k] = col[0]; atlas[k + 1] = col[1]; atlas[k + 2] = col[2]; atlas[k + 3] = c ? 255 : 0;
+        }
+      }
+    }
+  }
+  gl.bindTexture(gl.TEXTURE_2D, tex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 512, 256, 0, gl.RGBA, gl.UNSIGNED_BYTE, atlas); texParams(gl.CLAMP_TO_EDGE);
+}
+function uvRect(set, t) { const idx = set * 256 + t, e = 0.02; return [((idx % 64) * 8 + e) / 512, (Math.floor(idx / 64) * 8 + e) / 256, ((idx % 64) * 8 + 8 - e) / 512, (Math.floor(idx / 64) * 8 + 8 - e) / 256]; }
+
+// backdrop: a dimmed wall of the area's own rock - its 3 most-placed solid blocks (MRoom.blocks), laid out in 32 px
+// clumps by a fixed hash. Same as the app.
+const caveTex = gl.createTexture(); let bdKey = '', bdOk = false;
+gl.bindTexture(gl.TEXTURE_2D, caveTex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 256, 0, gl.RGBA, gl.UNSIGNED_BYTE, null); texParams(gl.REPEAT);
+function buildBackdrop(f, area) {
+  const key = area + ':' + (rom ? rom.length : 0); if (key === bdKey) return; bdKey = key;
+  const empty = t => { for (let i = 0; i < 16; i++) if (f.chr[0x1000 + t * 16 + i]) return false; return true; };
+  const pool = R.blocks(rom, area).filter(e => !e.tiles.some(empty));
+  const top = pool.map(e => e.count).sort((a, b) => b - a).filter((v, i, a) => a.indexOf(v) === i)[2] || 0;
+  const use = pool.filter(e => e.count >= top), total = use.reduce((s, e) => s + e.count, 0);
+  bdOk = total > 0; if (!bdOk) return;
+  const img = new Uint8Array(256 * 256 * 4);
+  const hash = (x, y, s) => { let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(s, 1274126177)) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return (h ^ (h >>> 16)) & 0x7FFFFFFF; };
+  for (let by = 0; by < 8; by++) for (let bx = 0; bx < 8; bx++) {
+    let h = hash(bx, by, area + 1) % total, e = 0; while (h >= use[e].count) { h -= use[e].count; e++; }
+    const E = use[e];
+    for (let q = 0; q < 16; q++) {
+      const tx = bx * 32 + (q & 3) * 8, ty = by * 32 + (q >> 2) * 8, t = E.tiles[((q >> 2) & 1) * 2 + (q & 1)];
+      for (let y = 0; y < 8; y++) {
+        const lo = f.chr[0x1000 + t * 16 + y], hi = f.chr[0x1000 + t * 16 + y + 8];
+        for (let x = 0; x < 8; x++) {
+          const c = ((lo >> (7 - x)) & 1) | (((hi >> (7 - x)) & 1) << 1), k = ((ty + y) * 256 + tx + x) * 4, col = c ? rgb(f.pal[E.pal * 4 + c]) : [0, 0, 0];
+          img[k] = col[0]; img[k + 1] = col[1]; img[k + 2] = col[2]; img[k + 3] = 255;
+        }
+      }
+    }
+  }
+  gl.bindTexture(gl.TEXTURE_2D, caveTex); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 256, gl.RGBA, gl.UNSIGNED_BYTE, img);
+}
+const maskData = new Uint8Array(256 * 256), maskTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, maskTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, 256, 256, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, maskData); texParams(gl.CLAMP_TO_EDGE);
+
+let verts = new Float32Array(1 << 18), nv = 0, caveStart = 0, caveCount = 0, spriteStart = 0, transStart = 0, transCount = 0, camDist = 400;
+function push(x, y, z, u, v, shade, kind) {
+  if (nv * 7 + 7 > verts.length) { const n = new Float32Array(verts.length * 2); n.set(verts); verts = n; }
+  const o = nv * 7; verts[o] = x; verts[o + 1] = y; verts[o + 2] = z; verts[o + 3] = u; verts[o + 4] = v; verts[o + 5] = shade; verts[o + 6] = kind; nv++;
+}
+function quad(a, b, c, d, uva, uvb, uvc, uvd, shade, kind) {
+  push(...a, ...uva, shade, kind); push(...b, ...uvb, shade, kind); push(...c, ...uvc, shade, kind);
+  push(...a, ...uva, shade, kind); push(...c, ...uvc, shade, kind); push(...d, ...uvd, shade, kind);
+}
+// The whole 256x240 room is shown (the game shows 224 lines of it; the top and bottom 8 are overscan).
+const SHAPED_MIN = +(new URLSearchParams(location.search).get('shaped') || 24);   // see-through pixels (of 64) for a cut-out stack
+function buildScene(f, opt) {
+  nv = 0;
+  const v = view(f), D = opt.depth, zf = D / 2, zb = -D / 2, backZ = opt.back === 'far' ? -D * 2.5 : zb - 0.01;
+  const cols = 32, rows = 30;
+  const emptyT = new Array(256);
+  for (let t = 0; t < 256; t++) { let e = true; for (let i = 0; i < 16 && e; i++) e = f.chr[v.bgBase + t * 16 + i] === 0; emptyT[t] = e; }
+  // Solid tiles with a lot of see-through pixels (round shapes, crescents, rings, open brickwork) are built as a stack of
+  // cut-out layers through the block depth, so only the drawn pixels have volume (like the door bubbles), not a cube.
+  const shapedT = new Array(256);
+  for (let t = 0; t < 256; t++) {
+    let holes = 0;
+    for (let y = 0; y < 8; y++) { const b = f.chr[v.bgBase + t * 16 + y] | f.chr[v.bgBase + t * 16 + y + 8]; for (let x = 0; x < 8; x++) if (!((b >> x) & 1)) holes++; }
+    shapedT[t] = t < 0xA0 && !emptyT[t] && holes >= SHAPED_MIN;
+  }
+  let lavaOk = true; for (let i = 0; i < 32 && lavaOk; i++) lavaOk = f.chr[v.bgBase + 0xF0 * 16 + i] === LAVA_PAT[i];
+  const isLava = t => lavaOk && (t === 0xF0 || t === 0xF1);
+  // passable tiles that look exactly like a solid one (hidden passages, pipes): drawn as see-through blocks
+  const pat = t => f.chr.subarray(v.bgBase + t * 16, v.bgBase + t * 16 + 16).join(','), solidPats = new Set();
+  for (let t = 0; t < 0xA0; t++) solidPats.add(pat(t));
+  const passable = t => t >= 0xA2 && t !== 0xFF && t !== 0xF0 && t !== 0xF1 && !emptyT[t] && solidPats.has(pat(t));
+  const trans = [];
+  const T = (c, r) => (c < 0 || r < 0 || c >= cols || r >= rows) ? { t: 0xFF, p: 0 } : ntTile(f, c * 8, r * 8);
+  const solidG = [], lavaG = [], ballG = [], passG = [];
+  for (let r = -1; r <= rows; r++) { const s = [], l = [], b = [], ps = []; for (let c = -1; c <= cols; c++) { const { t } = T(c, r); s.push(t !== 0xFF && t < 0xA0 && !emptyT[t]); l.push(isLava(t)); b.push(false); ps.push(passable(t)); } solidG.push(s); lavaG.push(l); ballG.push(b); passG.push(ps); }
+  const solid = (c, r) => solidG[r + 1][c + 1], lava = (c, r) => lavaG[r + 1][c + 1], pass = (c, r) => passG[r + 1][c + 1];
+  const full = (c, r) => solid(c, r) && !shapedT[T(c, r).t];     // hides a neighbour's side face only when it's a whole cube
+  // item balls held by Chozo statues ($88 $89 / $8A $8B): a flat picture turned to face the camera
+  const pr = cam.pitch * Math.PI / 180, yr = cam.yaw * Math.PI / 180;
+  const rx = Math.cos(yr), rz = -Math.sin(yr), ux = -Math.sin(pr) * Math.sin(yr), uy = Math.cos(pr), uz = -Math.sin(pr) * Math.cos(yr);
+  for (let r = 0; r < rows - 1; r++) for (let c = 0; c < cols - 1; c++) {
+    if (T(c, r).t !== 0x88 || T(c + 1, r).t !== 0x89 || T(c, r + 1).t !== 0x8A || T(c + 1, r + 1).t !== 0x8B) continue;
+    const p = T(c, r).p;
+    [[0, 0], [1, 0], [0, 1], [1, 1]].forEach(([dc, dr]) => { ballG[r + dr + 1][c + dc + 1] = true; solidG[r + dr + 1][c + dc + 1] = false; });
+    const x0 = c * 8, y0 = -r * 8, cx = x0 + 8, cy = y0 - 7.5;
+    [0x88, 0x89, 0x8A, 0x8B].forEach((t, i) => {
+      const a0 = x0 + (i & 1) * 8 - cx, a1 = a0 + 8, b0 = y0 - (i >> 1) * 8 - cy, b1 = b0 - 8;
+      const P = (a, b) => [cx + rx * a + ux * b, cy + uy * b, rz * a + uz * b];
+      const [u0, v0, u1, v1] = uvRect(p, t);
+      quad(P(a0, b1), P(a1, b1), P(a1, b0), P(a0, b0), [u0, v1], [u1, v1], [u1, v0], [u0, v0], 1, 2);
+    });
+  }
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const { t, p } = T(c, r);
+    if (t === 0xFF || ballG[r + 1][c + 1]) continue;
+    const x0 = c * 8, x1 = x0 + 8, y0 = -r * 8, y1 = y0 - 8, [u0, v0, u1, v1] = uvRect(p, t);
+    if (lava(c, r)) {   // liquid volume through the block depth, flat surface 2 px into the wave tile
+      quad([x0, y1, zf], [x1, y1, zf], [x1, y0, zf], [x0, y0, zf], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 1, 2);
+      const ys = lava(c, r - 1) ? y0 : y0 - 2;
+      if (!lava(c, r - 1)) { const [a0, b0, a1, b1] = uvRect(p, 0xF1); quad([x0, ys, zf], [x1, ys, zf], [x1, ys, zb], [x0, ys, zb], [a0, b1], [a1, b1], [a1, b0], [a0, b0], 0.92, 0); }
+      if (!lava(c - 1, r) && !solid(c - 1, r)) quad([x0, y1, zb], [x0, y1, zf], [x0, ys, zf], [x0, ys, zb], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.7, 0);
+      if (!lava(c + 1, r) && !solid(c + 1, r)) quad([x1, y1, zf], [x1, y1, zb], [x1, ys, zb], [x1, ys, zf], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.7, 0);
+      continue;
+    }
+    if (isDoorFrame(t) && !emptyT[t]) {
+      const zt = zb + D * 0.4;
+      quad([x0, y1, zt], [x1, y1, zt], [x1, y0, zt], [x0, y0, zt], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.9, 0);
+      if (!solid(c, r - 1)) quad([x0, y0, zt], [x1, y0, zt], [x1, y0, zb], [x0, y0, zb], [u0, v0], [u1, v0], [u1, v1], [u0, v1], 0.78, 0);
+      if (!solid(c, r + 1)) quad([x0, y1, zb], [x1, y1, zb], [x1, y1, zt], [x0, y1, zt], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.45, 0);
+      if (!solid(c - 1, r)) quad([x0, y1, zb], [x0, y1, zt], [x0, y0, zt], [x0, y0, zb], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.6, 0);
+      if (!solid(c + 1, r)) quad([x1, y1, zt], [x1, y1, zb], [x1, y0, zb], [x1, y0, zt], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.6, 0);
+      continue;
+    }
+    if (pass(c, r)) {   // walk-through tile that looks solid (passages, pipes, bushes): on the back wall + faint block
+      if (opt.back !== 'off') quad([x0, y1, backZ], [x1, y1, backZ], [x1, y0, backZ], [x0, y0, backZ], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.62, 1);
+      trans.push([c, r, p, t]); continue;
+    }
+    if (!solid(c, r)) { if (opt.back !== 'off' && !emptyT[t]) quad([x0, y1, backZ], [x1, y1, backZ], [x1, y0, backZ], [x0, y0, backZ], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.62, 1); continue; }
+    if (shapedT[t]) {
+      const step = Math.max(1, D / 8);
+      for (let zz = zb + step / 2; zz < zf; zz += step) quad([x0, y1, zz], [x1, y1, zz], [x1, y0, zz], [x0, y0, zz], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.72, 2);
+      quad([x0, y1, zf], [x1, y1, zf], [x1, y0, zf], [x0, y0, zf], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 1.0, 2);
+      continue;
+    }
+    quad([x0, y1, zf], [x1, y1, zf], [x1, y0, zf], [x0, y0, zf], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 1.0, 0);
+    if (!full(c, r - 1)) quad([x0, y0, zf], [x1, y0, zf], [x1, y0, zb], [x0, y0, zb], [u0, v0], [u1, v0], [u1, v1], [u0, v1], 0.86, 0);
+    if (!full(c, r + 1)) quad([x0, y1, zb], [x1, y1, zb], [x1, y1, zf], [x0, y1, zf], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.45, 0);
+    if (!full(c - 1, r)) quad([x0, y1, zb], [x0, y1, zf], [x0, y0, zf], [x0, y0, zb], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.66, 0);
+    if (!full(c + 1, r)) quad([x1, y1, zf], [x1, y1, zb], [x1, y0, zb], [x1, y0, zf], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.66, 0);
+  }
+  maskData.fill(0);
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const { t } = T(c, r); if (t === 0xFF || isDoorFrame(t)) continue;
+    for (let py = 0; py < 8; py++) {
+      const bits = f.chr[v.bgBase + t * 16 + py] | f.chr[v.bgBase + t * 16 + py + 8]; if (!bits) continue;
+      for (let px = 0; px < 8; px++) if ((bits >> (7 - px)) & 1) maskData[(r * 8 + py) * 256 + c * 8 + px] = 255;
+    }
+  }
+  const slab = findSlabs(f);
+  for (let s = 0; s < 64; s++) {
+    const o = 0x200 + s * 4, y = f.ram[o] + 1, t = f.ram[o + 1], at = f.ram[o + 2], x = f.ram[o + 3];
+    if (y >= 240 || !slab[s]) continue;
+    const [u0, v0, u1, v1] = uvRect(4 + (at & 3), t), ua = at & 0x40 ? u1 : u0, ub = at & 0x40 ? u0 : u1, va = at & 0x80 ? v1 : v0, vb = at & 0x80 ? v0 : v1;
+    const X0 = x, X1 = x + 8, Y0 = -y, Y1 = -y - 8;
+    for (let zz = zb + 0.5; zz < zf; zz += 1) quad([X0, Y1, zz], [X1, Y1, zz], [X1, Y0, zz], [X0, Y0, zz], [ua, vb], [ub, vb], [ub, va], [ua, va], 0.72, 2);
+    quad([X0, Y1, zf], [X1, Y1, zf], [X1, Y0, zf], [X0, Y0, zf], [ua, vb], [ub, vb], [ub, va], [ua, va], 1.0, 2);
+  }
+  caveStart = nv; caveCount = 0;
+  if (opt.cave && bdOk) {
+    const z = -D * 3 - 24, X0 = -1400, X1 = 1656, Ytop = 900, Ybot = -1300, sc = (camDist - z) / camDist;
+    const U = x => (x - 128) / (256 * sc), V = y => (-y - 120) / (256 * sc);
+    quad([X0, Ybot, z], [X1, Ybot, z], [X1, Ytop, z], [X0, Ytop, z], [U(X0), V(Ybot)], [U(X1), V(Ybot)], [U(X1), V(Ytop)], [U(X0), V(Ytop)], 1, 3);
+    caveCount = nv - caveStart;
+  }
+  transStart = nv;
+  trans.forEach(([c, r, p, t]) => {
+    const x0 = c * 8, x1 = x0 + 8, y0 = -r * 8, y1 = y0 - 8, [u0, v0, u1, v1] = uvRect(p, t), open = (cc, rr) => !solid(cc, rr) && !pass(cc, rr);
+    quad([x0, y1, zf], [x1, y1, zf], [x1, y0, zf], [x0, y0, zf], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 1.1, 6);
+    if (open(c, r - 1)) quad([x0, y0, zf], [x1, y0, zf], [x1, y0, zb], [x0, y0, zb], [u0, v0], [u1, v0], [u1, v1], [u0, v1], 0.95, 6);
+    if (open(c, r + 1)) quad([x0, y1, zb], [x1, y1, zb], [x1, y1, zf], [x0, y1, zf], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.6, 6);
+    if (open(c - 1, r)) quad([x0, y1, zb], [x0, y1, zf], [x0, y0, zf], [x0, y0, zb], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.75, 6);
+    if (open(c + 1, r)) quad([x1, y1, zf], [x1, y1, zb], [x1, y0, zb], [x1, y0, zf], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.75, 6);
+  });
+  transCount = nv - transStart;
+  spriteStart = nv;
+  for (let s = 63; s >= 0; s--) {
+    const o = 0x200 + s * 4, y = f.ram[o] + 1, t = f.ram[o + 1], at = f.ram[o + 2], x = f.ram[o + 3];
+    if (y >= 240 || slab[s]) continue;
+    const [u0, v0, u1, v1] = uvRect(4 + (at & 3), t), ua = at & 0x40 ? u1 : u0, ub = at & 0x40 ? u0 : u1, va = at & 0x80 ? v1 : v0, vb = at & 0x80 ? v0 : v1;
+    quad([x, -y - 8, 0], [x + 8, -y - 8, 0], [x + 8, -y, 0], [x, -y, 0], [ua, vb], [ub, vb], [ub, va], [ua, va], 1.0, at & 0x20 ? 5 : 2);
+  }
+}
+
+// ------------------------------------------------------------------ camera + render
+const PRESETS = { tilt: { pitch: 16, yaw: 0, zoom: 1 }, diorama: { pitch: 30, yaw: -24, zoom: 0.92 }, side: { pitch: 0, yaw: 0, zoom: 1 },
+                  low: { pitch: -10, yaw: 18, zoom: 1.05 }, far: { pitch: 22, yaw: 0, zoom: 0.62 }, top: { pitch: 62, yaw: 0, zoom: 0.8 } };
+let cam = { ...PRESETS.tilt }, camTarget = { ...PRESETS.tilt }, mode3d = true, lightAt = [128, -120], dirty = true;
+function mat4persp(fov, asp, n, f) { const t = 1 / Math.tan(fov / 2); return [t / asp, 0, 0, 0, 0, t, 0, 0, 0, 0, (f + n) / (n - f), -1, 0, 0, 2 * f * n / (n - f), 0]; }
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]], dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm = a => { const l = Math.hypot(...a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+function mat4look(e, c, up) { const z = norm(sub(e, c)), x = norm(cross(up, z)), y = cross(z, x); return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, e), -dot(y, e), -dot(z, e), 1]; }
+function mul(a, b) { const o = new Array(16).fill(0); for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) for (let k = 0; k < 4; k++) o[j * 4 + i] += a[k * 4 + i] * b[j * 4 + k]; return o; }
+function opts() { return { depth: +$('depth').value, back: $('back').value, light: $('light').checked, cave: $('cave').checked, grid: $('grid').checked }; }
+const stage = $('stage');
+function render() { dirty = true; }
+function draw() {
+  if (!frame) return;
+  const W = stage.clientWidth, H = stage.clientHeight;
+  if (!mode3d) {
+    glc.style.display = 'none'; flat.style.display = 'block';
+    const asp = 256 * 8 / 7 / 240; let w = W, h = W / asp; if (h > H) { h = H; w = H * asp; }
+    Object.assign(flat.style, { left: (W - w) / 2 + 'px', top: (H - h) / 2 + 'px', width: w + 'px', height: h + 'px' });
+    draw2D(frame); return;
+  }
+  glc.style.display = 'block'; flat.style.display = 'none';
+  const o = opts(), dpr = Math.min(2, devicePixelRatio || 1);
+  if (glc.width !== Math.round(W * dpr) || glc.height !== Math.round(H * dpr)) { glc.width = Math.round(W * dpr); glc.height = Math.round(H * dpr); }
+  gl.viewport(0, 0, glc.width, glc.height);
+  gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE);
+  buildAtlas(frame); if (o.cave) buildBackdrop(frame, frame.ram[0x74]); buildScene(frame, o);
+  gl.useProgram(prog); gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, verts.subarray(0, nv * 7), gl.DYNAMIC_DRAW);
+  const fov = 32 * Math.PI / 180, asp = glc.width / glc.height;
+  const halfH = Math.max(128, 136 * 8 / 7 / asp) / cam.zoom, dist = halfH / Math.tan(fov / 2) + o.depth;
+  camDist = dist;
+  const c = [128, -120, 0], p = cam.pitch * Math.PI / 180, y = cam.yaw * Math.PI / 180;
+  const eye = [c[0] + dist * Math.sin(y) * Math.cos(p), c[1] + dist * Math.sin(p), c[2] + dist * Math.cos(y) * Math.cos(p)];
+  const px = [8 / 7, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -128 * 8 / 7 + 128, 0, 0, 1];
+  gl.uniformMatrix4fv(uni('uMvp'), false, new Float32Array(mul(mat4persp(fov, asp, 10, 5000), mul(mat4look(eye, c, [0, 1, 0]), px))));
+  const bg = rgb(frame.pal[0]);
+  gl.uniform3f(uni('uBg'), bg[0] / 255, bg[1] / 255, bg[2] / 255);
+  gl.uniform1f(uni('uLightOn'), o.light ? 1 : 0); gl.uniform2f(uni('uLight'), lightAt[0], lightAt[1]);
+  gl.uniform1f(uni('uGrid'), o.grid ? 1 : 0);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(uni('uTex'), 0);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, caveTex); gl.uniform1i(uni('uCave'), 1);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, maskTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 256, gl.LUMINANCE, gl.UNSIGNED_BYTE, maskData); gl.uniform1i(uni('uMask'), 2);
+  gl.uniform1i(uni('uMode'), 0); gl.uniform1f(uni('uAlpha'), 1); gl.drawArrays(gl.TRIANGLES, 0, caveStart);
+  if (caveCount) { gl.uniform1i(uni('uMode'), 1); gl.drawArrays(gl.TRIANGLES, caveStart, caveCount); }
+  if (transCount) {   // see-through blocks: blended, no depth writes
+    gl.uniform1i(uni('uMode'), 0); gl.uniform1f(uni('uAlpha'), 0.42);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
+    gl.drawArrays(gl.TRIANGLES, transStart, transCount);
+    gl.depthMask(true); gl.disable(gl.BLEND); gl.uniform1f(uni('uAlpha'), 1);
+  }
+  if (nv > spriteStart) { gl.uniform1i(uni('uMode'), 0); gl.disable(gl.DEPTH_TEST); gl.drawArrays(gl.TRIANGLES, spriteStart, nv - spriteStart); }
+}
+function loop() {
+  let moving = false;
+  for (const k of ['pitch', 'yaw', 'zoom']) { const d = camTarget[k] - cam[k]; if (Math.abs(d) > 0.001) { cam[k] += d * 0.15; moving = true; } else cam[k] = camTarget[k]; }
+  if (moving || dirty) { dirty = false; draw(); }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// ------------------------------------------------------------------ UI
+function pickFile(fl) { if (fl) fl.arrayBuffer().then(b => openRom(b, true)); }
+$('pick').onclick = $('change').onclick = () => $('file').click();
+$('file').onchange = e => pickFile(e.target.files[0]);
+addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('drag'); });
+addEventListener('dragleave', () => document.body.classList.remove('drag'));
+addEventListener('drop', e => { e.preventDefault(); document.body.classList.remove('drag'); pickFile(e.dataTransfer.files[0]); });
+$('keep').checked = sget('mrv.keep', true);
+$('keep').onchange = () => { sset('mrv.keep', $('keep').checked); if (!$('keep').checked) { try { store && store.removeItem('mrv.rom'); } catch (e) {} } else if (rom) { try { store.setItem('mrv.rom', b64(rom)); } catch (e) {} } };
+$('area').onchange = () => selectRoom(+$('area').value, 0, -1);
+$('room').onchange = () => { const n = +$('room').value, i = worldMap.findIndex((v, k) => v === n && areaMap[k] === cur.area); selectRoom(cur.area, n, i); };
+$('prev').onclick = () => { const n = (cur.room + areas[cur.area].roomCount - 1) % areas[cur.area].roomCount; $('room').value = n; $('room').onchange(); };
+$('next').onclick = () => { const n = (cur.room + 1) % areas[cur.area].roomCount; $('room').value = n; $('room').onchange(); };
+const toggle = () => { mode3d = !mode3d; $('mode').textContent = mode3d ? '3D' : '2D'; $('mode').classList.toggle('on', mode3d); render(); };
+$('mode').onclick = toggle;
+$('cam').onchange = e => { camTarget = { ...PRESETS[e.target.value] }; sset('mrv.cam', e.target.value); };
+['depth', 'back', 'light', 'cave', 'grid'].forEach(id => { $(id).oninput = $(id).onchange = () => { sset('mrv.opt', { depth: $('depth').value, back: $('back').value, light: $('light').checked, cave: $('cave').checked, grid: $('grid').checked }); render(); }; });
+['doors', 'items'].forEach(id => $(id).onchange = () => { rebuild(); });
+(() => { const o = sget('mrv.opt', null); if (o) { $('depth').value = o.depth; $('back').value = o.back; $('light').checked = o.light; $('cave').checked = o.cave; $('grid').checked = o.grid; }
+         const c = sget('mrv.cam', 'tilt'); if (PRESETS[c]) { $('cam').value = c; cam = { ...PRESETS[c] }; camTarget = { ...PRESETS[c] }; } })();
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+  if (e.key === 'F2') { e.preventDefault(); toggle(); return; }
+  const d = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -32, ArrowDown: 32 }[e.key];
+  if (d && rom && cur.cell >= 0) {
+    e.preventDefault();
+    const x = (cur.cell & 31) + (d === -1 ? -1 : d === 1 ? 1 : 0), j = cur.cell + d;
+    if (x >= 0 && x < 32 && j >= 0 && j < 1024 && worldMap[j] !== 0xFF) selectCell(j);
+  }
+});
+let drag = null;
+glc.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, yaw: camTarget.yaw, pitch: camTarget.pitch }; glc.setPointerCapture(e.pointerId); });
+glc.addEventListener('pointermove', e => {
+  const r = glc.getBoundingClientRect(), asp = r.width / r.height, sx = 256 * 8 / 7 / Math.max(asp, 256 * 8 / 7 / 240);
+  lightAt = [128 + ((e.clientX - r.left) / r.width - 0.5) * 256 * Math.max(1, asp / (256 * 8 / 7 / 240)) * 7 / 8 / cam.zoom, -120 - ((e.clientY - r.top) / r.height - 0.5) * 240 / cam.zoom];
+  if ($('light').checked) render();
+  if (!drag) return;
+  camTarget.yaw = Math.max(-80, Math.min(80, drag.yaw - (e.clientX - drag.x) * 0.25));
+  camTarget.pitch = Math.max(-45, Math.min(80, drag.pitch + (e.clientY - drag.y) * 0.25));
+});
+glc.addEventListener('pointerup', () => drag = null);
+glc.addEventListener('wheel', e => { e.preventDefault(); camTarget.zoom = Math.max(0.3, Math.min(4, camTarget.zoom * (e.deltaY > 0 ? 0.92 : 1.08))); }, { passive: false });
+glc.addEventListener('dblclick', () => { camTarget = { ...PRESETS[$('cam').value] }; });
+addEventListener('resize', render);
+
+// reopen the remembered ROM
+(() => { const s = $('keep').checked && store && store.getItem('mrv.rom'); if (s) { try { openRom(Uint8Array.from(atob(s), c => c.charCodeAt(0)).buffer, false); } catch (e) {} } })();
+window.__open = b => openRom(b, false);   // test hook
+</script>
+</body>
+</html>

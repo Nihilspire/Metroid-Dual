@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Metroid 3D prototype</title>
+<style>
+  :root { --bg:#000; --panel:#0b0f2e; --line:#2038ec; --text:#c4d4fc; --hi:#fc9838; --dim:#5c6a9c; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.35 ui-monospace, Menlo, Consolas, monospace; overflow: hidden; }
+  #stage { position: absolute; inset: 0 0 64px 0; }
+  #gl, #flat, #hud { position: absolute; left: 0; top: 0; width: 100%; height: 100%; image-rendering: pixelated; }
+  #flat, #hud { pointer-events: none; }
+  #bar { position: absolute; left: 0; right: 0; bottom: 0; height: 64px; background: var(--panel); border-top: 1px solid var(--line);
+         display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 10px; }
+  button, select { background: #000; color: var(--text); border: 1px solid var(--line); padding: 3px 8px; font: inherit; cursor: pointer; }
+  button.on { border-color: var(--hi); color: var(--hi); }
+  input[type=range] { accent-color: var(--hi); }
+  #seek { flex: 1 1 200px; }
+  label { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); }
+  #info { color: var(--dim); min-width: 150px; text-align: right; }
+  #drop { position: absolute; inset: 0 0 64px 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; padding: 20px; }
+  #drop h1 { color: var(--hi); letter-spacing: 6px; margin: 0; font-size: 28px; }
+  #drop p { margin: 0; color: var(--dim); max-width: 520px; }
+  #drop.hidden { display: none; }
+  .drag #drop { background: rgba(32,56,236,.15); }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="gl"></canvas>
+  <canvas id="flat" width="256" height="224"></canvas>
+  <canvas id="hud" width="256" height="224"></canvas>
+</div>
+<div id="drop">
+  <h1>METROID 3D</h1>
+  <p>Open a <b>.mdrec</b> recording (drag it here or use OPEN). Recordings are made from your own ROM by the Metroid Dual desktop driver; this page contains no game data.</p>
+  <p>F2 or 2D/3D switches views. Drag to orbit, wheel to zoom, double-click to reset. Space plays/pauses, arrows step frames.</p>
+</div>
+<div id="bar">
+  <button id="open">OPEN</button><input id="file" type="file" accept=".mdrec" hidden>
+  <button id="play">PLAY</button>
+  <input id="seek" type="range" min="0" max="0" value="0">
+  <button id="mode" class="on">3D</button>
+  <select id="cam">
+    <option value="tilt">Tilt</option><option value="diorama">Diorama</option><option value="side">Side</option>
+    <option value="low">Low</option><option value="far">Far</option>
+  </select>
+  <label>Depth <input id="depth" type="range" min="4" max="32" step="2" value="16"></label>
+  <label>Back wall <select id="back"><option value="near">Near</option><option value="far">Deep</option><option value="off">Off</option></select></label>
+  <label>Edges <select id="edge"><option value="clip">Clip</option><option value="fade">Fade</option><option value="show">Show</option></select></label>
+  <label><input id="light" type="checkbox" checked>Light</label>
+  <label><input id="cave" type="checkbox" checked>Cave</label>
+  <label>Speed <select id="speed"><option>0.25</option><option>0.5</option><option selected>1</option><option>2</option></select></label>
+  <span id="info">no recording</span>
+</div>
+<script>
+'use strict';
+// ------------------------------------------------------------------ NES basics
+const NESPAL = [0x747474,0x24188C,0x0000A8,0x44009C,0x8C0074,0xA80010,0xA40000,0x7C0800,0x402C00,0x004400,0x005000,0x003C14,0x183C5C,0,0,0,
+  0xBCBCBC,0x0070EC,0x2038EC,0x8000F0,0xBC00BC,0xE40058,0xD82800,0xC84C0C,0x887000,0x009400,0x00A800,0x009038,0x008088,0,0,0,
+  0xFCFCFC,0x3CBCFC,0x5C94FC,0xCC88FC,0xF478FC,0xFC74B4,0xFC7460,0xFC9838,0xF0BC3C,0x80D010,0x4CDC48,0x58F898,0x00E8D8,0x787878,0,0,
+  0xFCFCFC,0xA8E4FC,0xC4D4FC,0xD4C8FC,0xFCC4FC,0xFCC4D8,0xFCBCB0,0xFCD8A8,0xFCE4A0,0xE0FCA0,0xA8F0BC,0xB0FCCC,0x9CFCF0,0xC4C4C4,0,0];
+const rgb = i => { const c = NESPAL[i & 63]; return [(c >> 16) & 255, (c >> 8) & 255, c & 255]; };
+
+// Metroid (USA) RAM used here
+const RAM = { scrollY: 0xFC, scrollX: 0xFD, ctrl: 0xFF, oam: 0x200 };
+// HUD sprites (DataDisplayTbl + digits + tanks): drawn flat in front, not in the 3D scene
+const HUD_TILES = new Set([0x5E, 0x5F, 0x76, 0x7F, 0x3A, 0x6E, 0x6F, 0xFF, 0x58, 0x59, ...Array.from({ length: 10 }, (_, i) => 0xA0 + i)]);
+// exact rows of the status display (tanks $17, EN $21, missiles $2B; OAM y+1), so missiles near the top-left aren't HUD
+const isHud = (y, t, x) => (y === 0x18 || y === 0x22 || y === 0x2C) && x < 0x50 && HUD_TILES.has(t);
+// In Metroid's room data, tiles below $A0 are solid (the game's own test before placing items).
+const isSolid = t => t < 0xA0;
+// Doors: bubble sprites (closed $0F/$1F/$2F, opening/closing $6A/$6B/$6C) and frame tiles $A0/$A1 (walkable)
+const DOOR_TILES = new Set([0x0F, 0x1F, 0x2F, 0x6A, 0x6B, 0x6C]);
+const STATUE_TILES = new Set([0xFA, 0xFB, 0xC5, 0xC6, 0xC7, 0xD5, 0xD6, 0xD7, 0xE5, 0xE6, 0xE7, 0xC8, 0xC9, 0xEB, 0xD8, 0xD9, 0xEA, 0xE8, 0xE9]);
+// solid objects drawn as slabs: door bubbles, the elevator platform ($28 $38 $38 $28 in a row), Tourian statues
+function findSlabs(f) {
+  const area = f.ram[0x74] & 15, slab = new Array(64).fill(false), spr = [];
+  for (let s = 0; s < 64; s++) { const o = RAM.oam + s * 4; spr.push([f.ram[o], f.ram[o + 1], f.ram[o + 3]]); }
+  spr.forEach(([y, t], s) => { slab[s] = y < 0xEF && (DOOR_TILES.has(t) || (area === 3 && STATUE_TILES.has(t))); });
+  spr.forEach(([y, t, x]) => {
+    if (y >= 0xEF || t !== 0x28) return;
+    const row = k => spr.some(([yy, tt, xx]) => yy === y && xx === x + 8 * k && (tt === 0x28 || tt === 0x38));
+    if (row(1) && row(2) && row(3)) spr.forEach(([yy, tt, xx], k) => { if (yy === y && xx >= x && xx <= x + 24 && (tt === 0x28 || tt === 0x38)) slab[k] = true; });
+  });
+  return slab;
+}
+const isDoorFrame = t => t === 0xA0 || t === 0xA1;
+
+// ------------------------------------------------------------------ recording
+// MDREC1 + zlib( frames: [flag u8][RAM 0x800][NT $2000-$2FFF 0x1000][PAL 0x20][CHR 0x2000 if flag&1] )
+let frames = [], cur = 0, playing = false;
+async function loadRecording(buf) {
+  const u = new Uint8Array(buf);
+  if (String.fromCharCode(...u.slice(0, 6)) !== 'MDREC1') throw new Error('not a .mdrec recording');
+  const ds = new Blob([u.slice(6)]).stream().pipeThrough(new DecompressionStream('deflate'));
+  const raw = new Uint8Array(await new Response(ds).arrayBuffer());
+  const out = []; let p = 0, chr = null;
+  while (p < raw.length) {
+    const flag = raw[p++];
+    const ram = raw.subarray(p, p + 0x800); p += 0x800;
+    const nt = raw.subarray(p, p + 0x1000); p += 0x1000;
+    const pal = raw.subarray(p, p + 0x20); p += 0x20;
+    if (flag & 1) { chr = raw.subarray(p, p + 0x2000); p += 0x2000; }
+    out.push({ ram, nt, pal, chr });
+  }
+  frames = out; cur = 0;
+  seek.max = frames.length - 1;
+  document.getElementById('drop').classList.add('hidden');
+  playing = true; playBtn.textContent = 'PAUSE';
+  render();
+}
+
+// ------------------------------------------------------------------ 2D reference renderer (what the NES shows)
+const flat = document.getElementById('flat'), fctx = flat.getContext('2d');
+const hud = document.getElementById('hud'), hctx = hud.getContext('2d');
+const fimg = fctx.createImageData(256, 224), himg = hctx.createImageData(256, 224);
+function decodeTile(chr, base, t, y) { return [chr[base + t * 16 + y], chr[base + t * 16 + y + 8]]; }
+function view(f) {
+  const ctrl = f.ram[RAM.ctrl];
+  return { ox: f.ram[RAM.scrollX] + (ctrl & 1) * 256, oy: f.ram[RAM.scrollY] + ((ctrl >> 1) & 1) * 240,
+           bgBase: ctrl & 0x10 ? 0x1000 : 0, spBase: ctrl & 0x08 ? 0x1000 : 0 };
+}
+// nametable lookup on the 512x480 plane (mirroring already applied in the dump)
+function ntTile(f, wx, wy) {
+  wx = ((wx % 512) + 512) % 512; wy = ((wy % 480) + 480) % 480;
+  const tbl = (wx >= 256 ? 1 : 0) + (wy >= 240 ? 2 : 0), x = (wx % 256) >> 3, y = (wy % 240) >> 3;
+  const t = f.nt[tbl * 0x400 + y * 32 + x];
+  const a = f.nt[tbl * 0x400 + 0x3C0 + (y >> 2) * 8 + (x >> 2)];
+  return { t, p: (a >> (((y & 2) << 1) | (x & 2))) & 3 };
+}
+function draw2D(f, img, hudOnly) {
+  const v = view(f), d = img.data, bgc = rgb(f.pal[0]);
+  const opaque = new Uint8Array(256 * 240);
+  for (let i = 0; i < d.length; i += 4) { d[i] = bgc[0]; d[i + 1] = bgc[1]; d[i + 2] = bgc[2]; d[i + 3] = hudOnly ? 0 : 255; }
+  if (!hudOnly) for (let sy = 8; sy < 232; sy++) for (let sx = 0; sx < 256; sx++) {
+    const wx = v.ox + sx, wy = v.oy + sy, { t, p } = ntTile(f, wx, wy);
+    const [lo, hi] = decodeTile(f.chr, v.bgBase, t, ((wy % 240) + 240) % 240 & 7), b = 7 - (wx & 7);
+    const c = ((lo >> b) & 1) | (((hi >> b) & 1) << 1);
+    if (c) { const k = ((sy - 8) * 256 + sx) * 4, col = rgb(f.pal[p * 4 + c]); d[k] = col[0]; d[k + 1] = col[1]; d[k + 2] = col[2]; opaque[sy * 256 + sx] = 1; }
+  }
+  for (let s = 63; s >= 0; s--) {
+    const o = RAM.oam + s * 4, y = f.ram[o] + 1, t = f.ram[o + 1], at = f.ram[o + 2], x = f.ram[o + 3];
+    if (y >= 240) continue;
+    const h = isHud(y, t, x);
+    if (hudOnly !== h) continue;
+    for (let r = 0; r < 8; r++) {
+      const ry = at & 0x80 ? 7 - r : r, [lo, hi] = decodeTile(f.chr, v.spBase, t, ry), sy = y + r;
+      if (sy < 8 || sy >= 232) continue;
+      for (let cx = 0; cx < 8; cx++) {
+        const b = at & 0x40 ? cx : 7 - cx, c = ((lo >> b) & 1) | (((hi >> b) & 1) << 1), sx = x + cx;
+        if (!c || sx > 255) continue;
+        if ((at & 0x20) && !hudOnly && opaque[sy * 256 + sx]) continue;
+        const k = ((sy - 8) * 256 + sx) * 4, col = rgb(f.pal[16 + (at & 3) * 4 + c]);
+        d[k] = col[0]; d[k + 1] = col[1]; d[k + 2] = col[2]; d[k + 3] = 255;
+      }
+    }
+  }
+}
+
+// ------------------------------------------------------------------ WebGL scene
+const gl = document.getElementById('gl').getContext('webgl2', { antialias: true });
+const VS = `#version 300 es
+in vec3 aPos; in vec2 aUv; in float aShade; in float aKind;
+uniform mat4 uMvp; out vec2 vUv; out float vShade; out float vKind; out vec3 vWorld;
+void main(){ vUv=aUv; vShade=aShade; vKind=aKind; vWorld=aPos; gl_Position=uMvp*vec4(aPos,1.0); }`;
+const FS = `#version 300 es
+precision highp float;
+in vec2 vUv; in float vShade; in float vKind; in vec3 vWorld;
+uniform sampler2D uTex; uniform sampler2D uCave; uniform vec3 uBg; uniform int uEdge; uniform vec2 uLight; uniform float uLightOn;
+uniform int uMode; uniform vec3 uTint; uniform vec3 uFog; uniform vec3 uCavePal[4]; uniform sampler2D uMask;
+out vec4 o;
+void main(){
+  vec4 c;
+  if (uMode == 1) {
+    // cave backdrop: NES rules. Each texel is a palette index 0-3 into a 4-colour NES palette; light works like an
+    // NES fade, stepping indices down (never blending), with a 2x2 dithered boundary in texel space.
+    float idx = floor(texture(uCave, vUv).r * 3.0 + 0.5);
+    vec2 tx = floor(vUv * vec2(256.0, 240.0));
+    float bay = mod(tx.x, 2.0) + mod(tx.y, 2.0) * 2.0;           // 0,1,2,3
+    float th = (bay == 0.0 ? 0.0 : bay == 1.0 ? 2.0 : bay == 2.0 ? 3.0 : 1.0) / 4.0;
+    float shift = 1.0;
+    if (uLightOn > 0.5) { float d = distance(vWorld.xy, uLight) / 72.0; shift = clamp(floor(d + th), 0.0, 1.0); }
+    idx = max(0.0, idx - shift);
+    o = vec4(idx < 0.5 ? uCavePal[0] : idx < 1.5 ? uCavePal[1] : idx < 2.5 ? uCavePal[2] : uCavePal[3], 1.0); return;
+  }
+  c = texture(uTex, vUv);
+  if (c.a < 0.5) { if (vKind < 0.5) c = vec4(uBg * 0.55, 1.0); else discard; }   // blocks: holes read as dark stone
+  // NES priority: 'behind background' sprites are hidden by opaque background pixels
+  if (vKind > 4.5 && texture(uMask, vec2((vWorld.x + 0.5) / 256.0, (-vWorld.y + 0.5) / 256.0)).r > 0.5) discard;
+  float shade = vShade;
+  if (uLightOn > 0.5) { float d = distance(vWorld.xy, uLight); shade *= mix(1.15, 0.55, smoothstep(30.0, 190.0, d)); }
+  vec3 col = c.rgb * shade;
+  float a = 1.0;
+  if (uEdge != 2) {   // 0 fade, 1 clip, 2 show : the 256x224 NES window is x 0..256, y -8..-232
+    float dx = max(max(-vWorld.x, vWorld.x - 256.0), 0.0), dy = max(max(vWorld.y + 8.0, -232.0 - vWorld.y), 0.0);
+    float out_ = max(dx, dy);
+    if (uEdge == 1 && out_ > 0.0) discard;
+    if (uEdge == 0) { a = 1.0 - smoothstep(0.0, 24.0, out_); if (a < 0.02) discard; }
+  }
+  o = vec4(mix(uFog, col, a), 1.0);
+}`;
+function shader(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(s); return s; }
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, FS)); gl.linkProgram(prog);
+const loc = n => gl.getAttribLocation(prog, n), uni = n => gl.getUniformLocation(prog, n);
+const vbo = gl.createBuffer(), vao = gl.createVertexArray();
+gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+const STRIDE = 7 * 4;
+[['aPos', 3, 0], ['aUv', 2, 12], ['aShade', 1, 20], ['aKind', 1, 24]].forEach(([n, s, off]) => { gl.enableVertexAttribArray(loc(n)); gl.vertexAttribPointer(loc(n), s, gl.FLOAT, false, STRIDE, off); });
+
+// Atlas: 2048 tiles (BG/SPR x 4 palettes x 256 tiles), 64 per row -> 512x256
+const tex = gl.createTexture(), atlas = new Uint8Array(512 * 256 * 4);
+let atlasKey = '';
+function buildAtlas(f) {
+  const key = f.chr && (f.chr.byteOffset + ':' + Array.from(f.pal).join(','));
+  if (key === atlasKey) return;
+  atlasKey = key;
+  const v = view(f);
+  for (let set = 0; set < 8; set++) {
+    const spr = set >= 4, pal = set & 3, base = spr ? v.spBase : v.bgBase;
+    for (let t = 0; t < 256; t++) {
+      const idx = set * 256 + t, ax = (idx % 64) * 8, ay = Math.floor(idx / 64) * 8;
+      for (let y = 0; y < 8; y++) {
+        const lo = f.chr[base + t * 16 + y], hi = f.chr[base + t * 16 + y + 8];
+        for (let x = 0; x < 8; x++) {
+          const c = ((lo >> (7 - x)) & 1) | (((hi >> (7 - x)) & 1) << 1), k = ((ay + y) * 512 + ax + x) * 4;
+          const col = rgb(f.pal[(spr ? 16 : 0) + pal * 4 + c]);
+          atlas[k] = col[0]; atlas[k + 1] = col[1]; atlas[k + 2] = col[2]; atlas[k + 3] = c ? 255 : 0;
+        }
+      }
+    }
+  }
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 512, 256, 0, gl.RGBA, gl.UNSIGNED_BYTE, atlas);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+}
+function uvRect(set, t) {
+  const idx = set * 256 + t, e = 0.02;
+  return [((idx % 64) * 8 + e) / 512, (Math.floor(idx / 64) * 8 + e) / 256, ((idx % 64) * 8 + 8 - e) / 512, (Math.floor(idx / 64) * 8 + 8 - e) / 256];
+}
+
+// ------------------------------------------------------------------ cave backdrop (procedural pixel art, tiles every 256x240)
+// Boulders on a 16 px grid in 4 shades, lit from the upper left, dithered cavities. Everything wraps at 256x240, and
+// the half-speed parallax wraps exactly when Metroid's 512x480 scroll plane does. Texels are scaled for the plane's
+// depth so one cave texel shows at the size of one game pixel.
+// NES-style cave tiles: Worley boulders on a 16px grid (wraps at 256x240), 4 shades, top-left light, Bayer dither.
+function caveTexture() {
+  const W = 256, H = 240, C = 16, NX = 16, NY = 15, img = new Uint8Array(W * H * 4);
+  const hash = (x, y, s) => { let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(s, 2147483647)) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967295; };
+  const md = (a, n) => ((a % n) + n) % n, sm = t => t * t * (3 - 2 * t);
+  const vnoise = (x, y, nx, ny, s) => {
+    const fx = x / W * nx, fy = y / H * ny, ix = Math.floor(fx), iy = Math.floor(fy), tx = sm(fx - ix), ty = sm(fy - iy);
+    const g = (a, b) => hash(md(a, nx), md(b, ny), s);
+    const a = g(ix, iy) + (g(ix + 1, iy) - g(ix, iy)) * tx, b = g(ix, iy + 1) + (g(ix + 1, iy + 1) - g(ix, iy + 1)) * tx;
+    return a + (b - a) * ty;
+  };
+  const BAYER = [0, 2, 3, 1];   // 2x2 ordered dither
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const ci = Math.floor(x / C), cj = Math.floor(y / C);
+    let f1 = 1e9, f2 = 1e9, dx1 = 0, dy1 = 0, id = 0;
+    for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+      const i = ci + di, j = cj + dj, wi = md(i, NX), wj = md(j, NY);
+      const px = i * C + 3 + Math.floor(hash(wi, wj, 1) * 10), py = j * C + 3 + Math.floor(hash(wi, wj, 2) * 10);
+      const dx = x - px, dy = y - py, d = dx * dx + dy * dy;
+      if (d < f1) { f2 = f1; f1 = d; dx1 = dx; dy1 = dy; id = wj * NX + wi; } else if (d < f2) f2 = d;
+    }
+    const r1 = Math.sqrt(f1), edge = Math.sqrt(f2) - r1, t = (dx1 + dy1) / (r1 + 0.001);
+    let s;
+    if (edge < 1.6) s = 0;                                    // crack between boulders
+    else if (edge < 2.6 && t < -0.1) s = 2;                   // lit rim on the upper-left edge
+    else if (t < -0.75 && r1 > 2 && r1 < 3.5) s = 3;          // small glint
+    else s = 1;                                               // boulder body
+    if (s === 3 && hash(id, 7, 3) < 0.5) s = 2;
+    const n = vnoise(x, y, 4, 4, 11) * 0.65 + vnoise(x, y, 8, 8, 12) * 0.35;
+    const b = BAYER[(y & 1) * 2 + (x & 1)] / 4;
+    if (n < 0.36 + b * 0.06) s = 0;                           // open cavities, dithered edge
+    else if (n < 0.44 + b * 0.06 && s > 1) s = 1;
+    const k = (y * W + x) * 4;                                // palette index 0..3, coloured in the shader
+    img[k] = s * 85; img[k + 1] = 0; img[k + 2] = 0; img[k + 3] = 255;
+  }
+  return img;
+}
+const caveTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, caveTex);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 240, 0, gl.RGBA, gl.UNSIGNED_BYTE, caveTexture());
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+let caveStart = 0, caveCount = 0, camDist = 400, spriteStart = 0;
+const maskData = new Uint8Array(256 * 256), maskTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, maskTex);
+gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, 256, 256, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, maskData);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+function caveBrightest(f) {   // dim tint from the area's background palette
+  let best = [0.5, 0.5, 0.5], bl = -1;
+  for (let i = 1; i < 4; i++) { const c = rgb(f.pal[i]), l = c[0] * 3 + c[1] * 6 + c[2]; if (l > bl) { bl = l; best = c.map(x => x / 255); } }
+  return best;
+}
+
+// The cave's NES palette: $0F black, the area's dark hue ($0h) twice, grey $2D (glints, only seen inside the light).
+function cavePalette(f) {
+  let hue = 0, bl = -1;
+  for (let i = 1; i < 4; i++) { const c = rgb(f.pal[i]), l = c[0] * 3 + c[1] * 6 + c[2]; if (l > bl) { bl = l; hue = f.pal[i] & 0x0F; } }
+  const dark = hue >= 1 && hue <= 0x0C ? hue : 0x2D;
+  return [0x0F, dark, dark, 0x2D];
+}
+
+let verts = new Float32Array(1 << 18), nv = 0;
+function push(x, y, z, u, v, shade, kind) {
+  if (nv * 7 + 7 > verts.length) { const n = new Float32Array(verts.length * 2); n.set(verts); verts = n; }
+  verts.set([x, y, z, u, v, shade, kind], nv * 7); nv++;
+}
+// quad from 4 corners (counter-clockwise from viewer) with uv corners (u0,v0)-(u1,v1) mapped a,b,c,d
+function quad(a, b, c, d, uva, uvb, uvc, uvd, shade, kind) {
+  push(...a, ...uva, shade, kind); push(...b, ...uvb, shade, kind); push(...c, ...uvc, shade, kind);
+  push(...a, ...uva, shade, kind); push(...c, ...uvc, shade, kind); push(...d, ...uvd, shade, kind);
+}
+
+function buildScene(f, opt) {
+  nv = 0;
+  const v = view(f), D = opt.depth, zf = D / 2, zb = -D / 2;
+  const backZ = opt.back === 'far' ? -D * 2.5 : zb - 0.01;
+  // only the cells the NES screen shows (the game writes the next strip just outside it while scrolling)
+  const tx0 = Math.floor(v.ox / 8), ty0 = Math.floor((v.oy + 8) / 8);
+  const cols = Math.floor((v.ox + 255) / 8) - tx0 + 1, rows = Math.floor((v.oy + 231) / 8) - ty0 + 1;
+  // solid map of the visible area (+1 border) for face culling
+  // tiles with no visible pixels (e.g. $4E, the invisible solid column behind a door bubble) never become blocks
+  const empty = t => { for (let i = 0; i < 16; i++) if (f.chr[v.bgBase + t * 16 + i]) return false; return true; };
+  const grid = [];
+  for (let r = -1; r <= rows; r++) { const row = []; for (let c = -1; c <= cols; c++) { const { t } = ntTile(f, (tx0 + c) * 8, (ty0 + r) * 8); row.push(t !== 0xFF && isSolid(t) && !empty(t)); } grid.push(row); }
+  const solid = (c, r) => grid[r + 1][c + 1];
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const wx = (tx0 + c) * 8, wy = (ty0 + r) * 8, { t, p } = ntTile(f, wx, wy);
+    if (t === 0xFF) continue;
+    const x0 = wx - v.ox, x1 = x0 + 8, y0 = -(wy - v.oy), y1 = y0 - 8;   // world y is up
+    const [u0, v0, u1, v1] = uvRect(p, t);
+    if (isDoorFrame(t) && !empty(t)) {
+      // door frame ($A0/$A1, walkable): a frame set into the wall, shallow so Samus stays visible walking through
+      const zt = zb + D * 0.4;
+      quad([x0, y1, zt], [x1, y1, zt], [x1, y0, zt], [x0, y0, zt], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.9, 0);
+      if (!solid(c, r - 1)) quad([x0, y0, zt], [x1, y0, zt], [x1, y0, zb], [x0, y0, zb], [u0, v0], [u1, v0], [u1, v1], [u0, v1], 0.78, 0);
+      if (!solid(c, r + 1)) quad([x0, y1, zb], [x1, y1, zb], [x1, y1, zt], [x0, y1, zt], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.45, 0);
+      if (!solid(c - 1, r)) quad([x0, y1, zb], [x0, y1, zt], [x0, y0, zt], [x0, y0, zb], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.6, 0);
+      if (!solid(c + 1, r)) quad([x1, y1, zt], [x1, y1, zb], [x1, y0, zb], [x1, y0, zt], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.6, 0);
+      continue;
+    }
+    if (!solid(c, r)) {
+      if (opt.back !== 'off' && !empty(t)) quad([x0, y1, backZ], [x1, y1, backZ], [x1, y0, backZ], [x0, y0, backZ], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.62, 1);
+      continue;
+    }
+    // front
+    quad([x0, y1, zf], [x1, y1, zf], [x1, y0, zf], [x0, y0, zf], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 1.0, 0);
+    // top (texture rows run front->back)
+    if (!solid(c, r - 1)) quad([x0, y0, zf], [x1, y0, zf], [x1, y0, zb], [x0, y0, zb], [u0, v0], [u1, v0], [u1, v1], [u0, v1], 0.86, 0);
+    if (!solid(c, r + 1)) quad([x0, y1, zb], [x1, y1, zb], [x1, y1, zf], [x0, y1, zf], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.45, 0);
+    if (!solid(c - 1, r)) quad([x0, y1, zb], [x0, y1, zf], [x0, y0, zf], [x0, y0, zb], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.66, 0);
+    if (!solid(c + 1, r)) quad([x1, y1, zf], [x1, y1, zb], [x1, y0, zb], [x1, y0, zf], [u0, v1], [u1, v1], [u1, v0], [u0, v0], 0.66, 0);
+  }
+  // screen mask of opaque background pixels (door frames excluded: recessed behind sprites in 3D)
+  maskData.fill(0);
+  for (let ty = Math.floor(v.oy / 8); ty <= Math.floor((v.oy + 239) / 8); ty++) for (let tx = Math.floor(v.ox / 8); tx <= Math.floor((v.ox + 255) / 8); tx++) {
+    const { t } = ntTile(f, tx * 8, ty * 8);
+    if (t === 0xFF || t === 0xA0 || t === 0xA1) continue;
+    for (let py = 0; py < 8; py++) {
+      const sy = ty * 8 + py - v.oy; if (sy < 0 || sy >= 240) continue;
+      const bits = f.chr[v.bgBase + t * 16 + py] | f.chr[v.bgBase + t * 16 + py + 8]; if (!bits) continue;
+      for (let px = 0; px < 8; px++) { const sx = tx * 8 + px - v.ox; if (sx >= 0 && sx < 256 && (bits >> (7 - px)) & 1) maskData[sy * 256 + sx] = 255; }
+    }
+  }
+  // solid objects (doors, elevator, statues): slabs through the block depth, depth-tested with the blocks
+  const slab = findSlabs(f);
+  for (let s = 0; s < 64; s++) {
+    const o = RAM.oam + s * 4, y = f.ram[o] + 1, t = f.ram[o + 1], at = f.ram[o + 2], x = f.ram[o + 3];
+    if (y >= 240 || !slab[s] || isHud(y, t, x)) continue;
+    const [u0, v0, u1, v1] = uvRect(4 + (at & 3), t);
+    const ua = at & 0x40 ? u1 : u0, ub = at & 0x40 ? u0 : u1, va = at & 0x80 ? v1 : v0, vb = at & 0x80 ? v0 : v1;
+    const X0 = x, X1 = x + 8, Y0 = -y, Y1 = -y - 8;
+    for (let zz = zb + 0.5; zz < zf; zz += 1) quad([X0, Y1, zz], [X1, Y1, zz], [X1, Y0, zz], [X0, Y0, zz], [ua, vb], [ub, vb], [ub, va], [ua, va], 0.72, 2);
+    quad([X0, Y1, zf], [X1, Y1, zf], [X1, Y0, zf], [X0, Y0, zf], [ua, vb], [ub, vb], [ub, va], [ua, va], 1.0, 2);
+  }
+  // cave plane far behind, scrolling at half speed (seamless across Metroid's 512x480 scroll plane)
+  caveStart = nv; caveCount = 0;
+  if (opt.cave) {
+    const z = -D * 3 - 24, X0 = -1400, X1 = 1656, Ytop = 900, Ybot = -1300, k = 0.5, sc = (camDist - z) / camDist;
+    const U = x => (x - 128) / (256 * sc) + v.ox * k / 256, V = y => (-y - 120) / (240 * sc) + v.oy * k / 240;
+    quad([X0, Ybot, z], [X1, Ybot, z], [X1, Ytop, z], [X0, Ytop, z], [U(X0), V(Ybot)], [U(X1), V(Ybot)], [U(X1), V(Ytop)], [U(X0), V(Ytop)], 1, 3);
+    caveCount = nv - caveStart;
+  }
+  // other sprites: cut-outs mid-depth, drawn last without depth testing so terrain never cuts them off
+  spriteStart = nv;
+  let light = null;
+  for (let s = 63; s >= 0; s--) {
+    const o = RAM.oam + s * 4, y = f.ram[o] + 1, t = f.ram[o + 1], at = f.ram[o + 2], x = f.ram[o + 3];
+    if (y >= 240 || isHud(y, t, x) || slab[s]) continue;
+    const [u0, v0, u1, v1] = uvRect(4 + (at & 3), t);
+    const ua = at & 0x40 ? u1 : u0, ub = at & 0x40 ? u0 : u1, va = at & 0x80 ? v1 : v0, vb = at & 0x80 ? v0 : v1;
+    const X0 = x, X1 = x + 8, Y0 = -y, Y1 = -y - 8;
+    quad([X0, Y1, 0], [X1, Y1, 0], [X1, Y0, 0], [X0, Y0, 0], [ua, vb], [ub, vb], [ub, va], [ua, va], 1.0, at & 0x20 ? 5 : 2);
+    if ((at & 3) === 0) light = [x + 4, -y - 8];
+  }
+  return light;
+}
+
+// ------------------------------------------------------------------ camera
+const PRESETS = { tilt: { pitch: 16, yaw: 0, zoom: 1.0 }, diorama: { pitch: 30, yaw: -24, zoom: 0.92 }, side: { pitch: 0, yaw: 0, zoom: 1.0 },
+                  low: { pitch: -10, yaw: 18, zoom: 1.05 }, far: { pitch: 22, yaw: 0, zoom: 0.62 } };
+let cam = { ...PRESETS.tilt }, camTarget = { ...PRESETS.tilt };
+function mat4persp(fov, asp, n, f) { const t = 1 / Math.tan(fov / 2); return [t / asp, 0, 0, 0, 0, t, 0, 0, 0, 0, (f + n) / (n - f), -1, 0, 0, 2 * f * n / (n - f), 0]; }
+function mat4look(e, c, up) {
+  const z = norm(sub(e, c)), x = norm(cross(up, z)), y = cross(z, x);
+  return [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, e), -dot(y, e), -dot(z, e), 1];
+}
+function mul(a, b) { const o = new Array(16).fill(0); for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) for (let k = 0; k < 4; k++) o[j * 4 + i] += a[k * 4 + i] * b[j * 4 + k]; return o; }
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]], dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm = a => { const l = Math.hypot(...a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+
+// ------------------------------------------------------------------ frame
+const glc = document.getElementById('gl'), stage = document.getElementById('stage');
+let mode3d = true;
+function opts() { return { depth: +depthEl.value, back: backEl.value, edge: edgeEl.value, light: lightEl.checked, cave: caveEl.checked }; }
+function fitRect() {   // the NES picture's rectangle on the stage (8:7 pixels), used by 2D view and HUD
+  const W = stage.clientWidth, H = stage.clientHeight, asp = 256 * 8 / 7 / 224;
+  let w = W, h = W / asp; if (h > H) { h = H; w = H * asp; }
+  return { x: (W - w) / 2, y: (H - h) / 2, w, h };
+}
+function placeCanvas(c, r) { Object.assign(c.style, { left: r.x + 'px', top: r.y + 'px', width: r.w + 'px', height: r.h + 'px' }); }
+function render() {
+  if (!frames.length) return;
+  const f = frames[cur], o = opts();
+  const r = fitRect();
+  placeCanvas(flat, r); placeCanvas(hud, r);
+  flat.style.display = mode3d ? 'none' : 'block';
+  glc.style.display = mode3d ? 'block' : 'none';
+  if (!mode3d) { draw2D(f, fimg, false); fctx.putImageData(fimg, 0, 0); hctx.clearRect(0, 0, 256, 224); }
+  else {
+    draw2D(f, himg, true); hctx.putImageData(himg, 0, 0);
+    const dpr = Math.min(2, devicePixelRatio || 1), W = stage.clientWidth, H = stage.clientHeight;
+    if (glc.width !== Math.round(W * dpr) || glc.height !== Math.round(H * dpr)) { glc.width = Math.round(W * dpr); glc.height = Math.round(H * dpr); }
+    gl.viewport(0, 0, glc.width, glc.height);
+    const bg = rgb(f.pal[0]);
+    gl.clearColor(bg[0] / 255 * 0.5, bg[1] / 255 * 0.5, bg[2] / 255 * 0.5, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE);
+    buildAtlas(f);
+    const light = buildScene(f, o);
+    gl.useProgram(prog); gl.bindVertexArray(vao); gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, verts.subarray(0, nv * 7), gl.DYNAMIC_DRAW);
+    // camera: frame the 256x224 window at zoom 1, sized to the stage's aspect
+    for (const k of ['pitch', 'yaw', 'zoom']) cam[k] += (camTarget[k] - cam[k]) * 0.12;
+    const fov = 32 * Math.PI / 180, asp = glc.width / glc.height;
+    const halfH = Math.max(112, 128 * 8 / 7 / asp * 1.0) / cam.zoom, dist = halfH / Math.tan(fov / 2) + o.depth;
+    camDist = dist;
+    const c = [128 * 8 / 7 / (8 / 7), -120, 0], p = cam.pitch * Math.PI / 180, y = cam.yaw * Math.PI / 180;
+    const eye = [c[0] + dist * Math.sin(y) * Math.cos(p), c[1] + dist * Math.sin(p), c[2] + dist * Math.cos(y) * Math.cos(p)];
+    const proj = mat4persp(fov, asp, 10, 5000), viewM = mat4look(eye, c, [0, 1, 0]);
+    // NES pixels are 8:7: stretch x before the camera
+    const px = [8 / 7, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -128 * 8 / 7 + 128, 0, 0, 1];
+    gl.uniformMatrix4fv(uni('uMvp'), false, new Float32Array(mul(proj, mul(viewM, px))));
+    gl.uniform3f(uni('uBg'), bg[0] / 255, bg[1] / 255, bg[2] / 255);
+    gl.uniform1i(uni('uEdge'), { fade: 0, clip: 1, show: 2 }[o.edge]);
+    gl.uniform1f(uni('uLightOn'), o.light && light ? 1 : 0);
+    gl.uniform2f(uni('uLight'), light ? light[0] : 128, light ? light[1] : -120);
+    const tint = caveBrightest(f);
+    const cp = cavePalette(f).map(i => rgb(i).map(x => x / 255));
+    gl.uniform3fv(uni('uCavePal'), new Float32Array([].concat(...cp)));
+    const fog = [0, 0, 0];
+    gl.uniform3f(uni('uTint'), tint[0], tint[1], tint[2]); gl.uniform3f(uni('uFog'), fog[0], fog[1], fog[2]);
+    if (o.cave) gl.clearColor(fog[0], fog[1], fog[2], 1); else gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(uni('uTex'), 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, caveTex); gl.uniform1i(uni('uCave'), 1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, maskTex); gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 256, gl.LUMINANCE, gl.UNSIGNED_BYTE, maskData); gl.uniform1i(uni('uMask'), 2);
+    gl.uniform1i(uni('uMode'), 0);
+    gl.drawArrays(gl.TRIANGLES, 0, caveStart);
+    if (caveCount) { gl.uniform1i(uni('uMode'), 1); gl.drawArrays(gl.TRIANGLES, caveStart, caveCount); }
+    if (nv > spriteStart) {
+      gl.uniform1i(uni('uMode'), 0); gl.disable(gl.DEPTH_TEST);
+      gl.drawArrays(gl.TRIANGLES, spriteStart, nv - spriteStart);
+      gl.enable(gl.DEPTH_TEST);
+    }
+  }
+  seek.value = cur;
+  info.textContent = `frame ${cur + 1}/${frames.length}` + (mode3d ? `  ${Math.round(nv / 3)} tris` : '');
+}
+
+// ------------------------------------------------------------------ UI
+const $ = id => document.getElementById(id);
+const playBtn = $('play'), seek = $('seek'), info = $('info'), depthEl = $('depth'), backEl = $('back'), edgeEl = $('edge'), lightEl = $('light'), caveEl = $('cave');
+$('open').onclick = () => $('file').click();
+$('file').onchange = e => { const fl = e.target.files[0]; if (fl) fl.arrayBuffer().then(loadRecording).catch(err => alert(err.message || err)); };
+addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('drag'); });
+addEventListener('dragleave', () => document.body.classList.remove('drag'));
+addEventListener('drop', e => { e.preventDefault(); document.body.classList.remove('drag'); const fl = e.dataTransfer.files[0]; if (fl) fl.arrayBuffer().then(loadRecording).catch(err => alert(err.message || err)); });
+playBtn.onclick = () => { playing = !playing; playBtn.textContent = playing ? 'PAUSE' : 'PLAY'; };
+seek.oninput = () => { cur = +seek.value; render(); };
+const toggle = () => { mode3d = !mode3d; $('mode').textContent = mode3d ? '3D' : '2D'; $('mode').classList.toggle('on', mode3d); render(); };
+$('mode').onclick = toggle;
+$('cam').onchange = e => { camTarget = { ...PRESETS[e.target.value] }; };
+[depthEl, backEl, edgeEl, lightEl, caveEl].forEach(el => el.oninput = el.onchange = render);
+addEventListener('keydown', e => {
+  if (e.key === 'F2') { e.preventDefault(); toggle(); }
+  else if (e.key === ' ') { e.preventDefault(); playBtn.onclick(); }
+  else if (e.key === 'ArrowRight') { cur = Math.min(frames.length - 1, cur + 1); render(); }
+  else if (e.key === 'ArrowLeft') { cur = Math.max(0, cur - 1); render(); }
+});
+let drag = null;
+glc.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, yaw: camTarget.yaw, pitch: camTarget.pitch }; glc.setPointerCapture(e.pointerId); });
+glc.addEventListener('pointermove', e => {
+  if (!drag) return;
+  camTarget.yaw = Math.max(-70, Math.min(70, drag.yaw - (e.clientX - drag.x) * 0.25));
+  camTarget.pitch = Math.max(-40, Math.min(70, drag.pitch + (e.clientY - drag.y) * 0.25));
+});
+glc.addEventListener('pointerup', () => drag = null);
+glc.addEventListener('wheel', e => { e.preventDefault(); camTarget.zoom = Math.max(0.3, Math.min(3, camTarget.zoom * (e.deltaY > 0 ? 0.92 : 1.08))); }, { passive: false });
+glc.addEventListener('dblclick', () => { camTarget = { ...PRESETS[$('cam').value] }; });
+addEventListener('resize', render);
+
+let acc = 0, lastT = performance.now();
+function loop(t) {
+  const dt = Math.min(0.1, (t - lastT) / 1000); lastT = t;
+  if (playing && frames.length) {
+    acc += dt * 60.0988 * +$('speed').value;
+    while (acc >= 1) { acc -= 1; cur = (cur + 1) % frames.length; }
+  }
+  render();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+window.__load = b64 => loadRecording(Uint8Array.from(atob(b64), c => c.charCodeAt(0)).buffer);   // test hook
+</script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+load s3.st
+recopen brinstar.raw
+rec 30
+rec 50 L
+rec 20 LA
+rec 40 L
+rec 10 LB
+rec 6 L
+rec 10 LB
+rec 30 L
+rec 25 LA
+rec 40 L
+rec 30 R
+rec 25 RA
+rec 60 R
+rec 10 RB
+rec 5 R
+rec 10 RB
+rec 80 R
+rec 30 RA
+rec 90 R
+rec 40
+recclose
+shot end.ppm

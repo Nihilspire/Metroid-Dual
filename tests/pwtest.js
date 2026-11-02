@@ -1,0 +1,10 @@
+const M = require('/home/claude/metroid-dual/app/assets/link/metroid.js');
+const fs = require('fs');
+const rom = fs.readFileSync('/home/claude/test/metroid.nes'), d = fs.readFileSync('/home/claude/test/g.bin');
+let hex = M.SPEC.map(s => { let h = ''; for (let i = 0; i < s[2]; i++) h += d[s[1] + i].toString(16).padStart(2, '0'); return h; }).join('');
+const ram = M.parse(hex), items = M.items(rom);
+const pw = M.password(ram, items, d[0x6998]);
+console.log('mine ', pw.bytes.map(x => x.toString(16).padStart(2, '0')).join(' '));
+console.log('game ', [...d.slice(0x6988, 0x699A)].map(x => x.toString(16).padStart(2, '0')).join(' '));
+console.log(M.pwText(pw.chars), '|', M.pwText([...d.slice(0x699A, 0x69B2)]));
+console.log(M.status(ram), M.energy(ram), M.ending(M.status(ram).age), M.collected(ram, items));
