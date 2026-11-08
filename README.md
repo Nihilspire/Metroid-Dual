@@ -1,13 +1,17 @@
 # Metroid Dual
 
 Metroid (NES) on two screens: the game on one, a **Metroid Link** companion screen on the other.
-It shows live status, an auto-map with a next-objective guide, the current password and save slots.
+It shows live status, an auto-map with a next-objective guide, and save state shortcuts
+Keeps track of items obtained in game as well as total playtime for ending tracking.
 It runs as an Android app (Surface Duo, dual-screen handhelds, a second display, or split screen) and on
 ROCKNIX dual-screen handhelds (Anbernic RG DS). There's also **Metroid Link**, the companion screen on its own,
-for playing in RetroArch.
+for playing in RetroArch if you want to keep Retroachivement support.
 
 **No game files are included.** You supply your own *Metroid (USA)* ROM. The font, sprites, map, rooms and item
 table are read from it at runtime.
+
+## AI-assisted?
+Feel free to skip over if you feel strongly about it. Claude's `Opus 5.5` was used for ram mapping and initial coding and `Qwen-3-coding` was used for code review. Code is open-source, feel free to use as a base and human it up.
 
 ## Downloads
 See [Releases](../../releases):
@@ -16,25 +20,25 @@ See [Releases](../../releases):
 |---|---|
 | `Metroid Dual <ver>.apk` | Android: emulator + Link screen in one app |
 | `Metroid Dual <ver> ROCKNIX.zip` | ROCKNIX port (game on the top screen, Link on the bottom) |
-| `Metroid Link <ver>.apk` | Android: Link screen only, reading Metroid running in RetroArch |
+| `Metroid Link <ver>.apk` | Android: Link screen only, reading Metroid running in RetroArch. Works with Retroachivements. |
 | `Metroid Link <ver> ROCKNIX.zip` | ROCKNIX: starts RetroArch on the top screen with the Link screen on the bottom |
 
 ## Features
 - **Link screen:**
-  - Status: energy and tanks, missiles, gear, bosses, play time, current ending rank, escape timer.
+  - Status: energy and tanks, missiles, gear, bosses, play time, and current ending.
   - Auto-map in the style of Zero Mission, coloured by area. The close-up view can be dragged; tap for the whole map.
     Shows item and beam markers and a NEXT guide to the next objective.
-  - Live password, and a mission report with a signature at the ending.
+  - Mission report (gameplay stat screen) with a signature at the ending.
 - **Save states:** 4 slots with screenshots, plus quick save/load and an auto state on exit.
 - **Screens:**
   - Surface Duo hinge, a second display, split screen (side by side / top and bottom with a hinge gap),
     or one screen with a side panel or overlay.
-  - 16:9 borders themed from the game's own tiles.
-- **Controls:** touch pad, controller support with rebinding.
+  - 16:9 borders themed from the game's own tiles. Border based on the most populous tile in that area.
+- **Controls:** Touch pad support and controller support with rebinding.
 - **NO SLOWDOWN:** the emulator's overclock removes the original game's slowdown.
 - **Launcher music:** synthesized menu music.
 - **Experimental 3D view:** the game rebuilt in 3D every frame, with a light that follows Samus and a backdrop of the
-  area's own rock.
+  area's own textures.
 - **Playtest codes:** hidden behind the Konami code on the launcher.
 - **Room viewer:** `tools/roomviewer` is a standalone web page that browses every room in 2D/3D from your ROM.
 
@@ -67,6 +71,7 @@ make -C linux host link-host       # x86_64 with the system SDL2, for testing un
 
 ## Credits and licences
 This project is licensed under the **GNU General Public License v2.0 or later** (see `LICENSE`).
+If you do use parts of it in your project, please credit me as a "playtester".
 The release builds include:
 - **libretro-fceumm** (GPL-2.0), github.com/libretro/libretro-fceumm, unmodified, commit `ac0d00a7`.
 - **QuickJS-ng** (MIT), github.com/quickjs-ng/quickjs, unmodified, commit `c1ed1943` (ROCKNIX builds).
@@ -85,10 +90,3 @@ ROM (file offsets incl. header): font `0x1B4D0` (64 tiles), sprite table `0x1801
 item table `0x1039` (60 words: type<<10 | x<<5 | y), frame/placement tables `0x461B` / `0x46EF`.
 Addresses from nmikstas/metroid-disassembly, verified by booting the ROM in the desktop driver.
 
-## Tests
-- `make -C native TARGET=host FCEUMM=... host` builds `out/host/drive`, a desktop driver that runs the ROM from a
-  script (run/tap/shot/dump/save/load/peek/poke).
-- `tests/pwtest.js` compares the JS password generator with the game's own, from a RAM dump.
-- `tests/linktest.py` and `tests/menutest.py` render the pages in headless Chromium with a mock Native/Host fed from
-  a dump.
-- `tools/mock_ra.py` answers RetroArch network commands from a dump, for testing Metroid Link without RetroArch.
