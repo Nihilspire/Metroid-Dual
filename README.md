@@ -10,6 +10,22 @@ for playing in RetroArch if you want to keep Retroachivement support.
 **No game files are included.** You supply your own *Metroid (USA)* ROM. The font, sprites, map, rooms and item
 table are read from it at runtime.
 
+## Screenshots
+Game on the top screen, Link screen below, in a New 3DS-style layout. 16:9 borders are on and the map is zoomed
+out to the whole map. The first two are the plain 2D game; the rest use the experimental 3D view.
+
+<p>
+<img src="docs/screenshots/brinstar-morph-ball-2d.png" width="24%" alt="Brinstar, Morph Ball room (2D)">
+<img src="docs/screenshots/brinstar-skree-corridor-2d.png" width="24%" alt="Brinstar, Skree corridor (2D)">
+<img src="docs/screenshots/brinstar-main-shaft-3d.png" width="24%" alt="Brinstar, main shaft (3D view)">
+<img src="docs/screenshots/norfair-shaft-3d.png" width="24%" alt="Norfair, shaft below the elevator (3D view)">
+</p>
+<p>
+<img src="docs/screenshots/norfair-shaft-bottom-3d.png" width="24%" alt="Norfair, shaft bottom (3D view)">
+<img src="docs/screenshots/norfair-screw-attack-3d.png" width="24%" alt="Norfair, Screw Attack room (3D view)">
+<img src="docs/screenshots/tourian-metroids-3d.png" width="24%" alt="Tourian, Metroids in the shaft (3D view)">
+</p>
+
 ## AI-assisted?
 Feel free to skip over if you feel strongly about it. Claude's `Opus 5.5` was used for ram mapping and initial coding and `Qwen-3-coding` was used for code review. Code is open-source, feel free to use as a base and human it up.
 
